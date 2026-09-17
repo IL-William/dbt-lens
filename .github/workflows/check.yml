@@ -3,6 +3,11 @@ name: check
 on:
   push:
   pull_request:
+  # Advisories are published without anything being pushed, so both audits
+  # also run every Monday. A failure there is emailed to whoever last edited
+  # this schedule.
+  schedule:
+    - cron: "17 6 * * 1"
 
 # Nothing here writes anything back. A fork's pull request gets a read-only
 # token whatever this says, so the workflow is written to need nothing more.
@@ -40,3 +45,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo install cargo-audit --locked
       - run: cargo audit
+
+  # web/vendor/ against OSV: nothing else reads it, not cargo audit, not
+  # Dependabot. Standard library Python, so there is nothing to install.
+  vendored:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/audit_vendored.py

@@ -73,6 +73,8 @@ needs was on `PATH`. The README gives both that route and the cross-compile.
 
 ## Automated checks
 
-GitHub Actions runs `cargo test` and a RustSec audit of the lockfile on every
-push, and Dependabot opens weekly lockfile bumps. The browser harnesses are not
+GitHub Actions runs `cargo test`, a RustSec audit of the lockfile and an OSV
+audit of `web/vendor/` on every push and every Monday, and Dependabot opens
+weekly lockfile bumps. CodeMirror is at 5.65.21 since 2026-09-17, which does
+not fix CVE-2025-6493 (SECURITY.md). The browser harnesses are not
 in CI: they need `jsc`, which ships with macOS (0013).

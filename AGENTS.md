@@ -11,14 +11,18 @@ That is why there is no build step, no framework, and a short dependency list.
 ## Verify
 
 ```
-./scripts/check.sh          # Rust tests, cargo audit, browser tests, syntax
+./scripts/check.sh          # Rust tests, both audits, browser tests, syntax
 ```
 
 Run it before saying a change works. It is the only answer to "how do I check
 this", and it needs nothing installed beyond Rust and macOS. The audit step
 needs `cargo install cargo-audit --locked` and skips itself without it, like
-the browser half without a JavaScript shell. GitHub Actions runs the Rust tests
-and the audit on every push, never the browser half, which wants macOS (0013).
+the browser half without a JavaScript shell. The second audit asks OSV about
+`web/vendor/` and skips itself offline. GitHub Actions runs the Rust tests and
+both audits on every push and every Monday, never the browser half, which wants
+macOS (0013). Updating a vendored library means changing its version in
+`scripts/audit_vendored.py` and `THIRD_PARTY_NOTICES.md` too: the audit fails
+when they disagree.
 
 ## Run
 
