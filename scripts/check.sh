@@ -35,6 +35,21 @@ else
 fi
 
 echo
+echo "== vendored libraries =="
+# web/vendor/ against OSV, which neither cargo audit nor Dependabot reads. Needs
+# python3 and the network, so it skips itself without them; CI runs it every time.
+if ! command -v python3 > /dev/null 2>&1; then
+  echo "SKIPPED: no python3"
+else
+  python3 scripts/audit_vendored.py
+  case $? in
+    0) echo "vendored ok" ;;
+    2) echo "SKIPPED: OSV unreachable" ;;
+    *) echo "VENDORED FAILED"; failed=$((failed + 1)) ;;
+  esac
+fi
+
+echo
 echo "== browser tests =="
 if [ ! -x "$JSC" ] && ! command -v "$JSC" > /dev/null 2>&1; then
   echo "SKIPPED: no JavaScript shell at $JSC. Set JSC to one to run these."

@@ -32,17 +32,20 @@ the editor reads and writes their files.
 
 ## Known issues
 
-- **CodeMirror 5.65.16 carries CVE-2025-6493**, a regular expression that goes
+- **CodeMirror 5.65.21 carries CVE-2025-6493**, a regular expression that goes
   quadratic on crafted input in the Markdown mode. It is fixed only in
   CodeMirror 6, which this project does not use and will not adopt lightly
   (0004). Reaching it means opening a hostile `.md` file that is already in the
   project you opened, and the result is a frozen browser tab, not code
-  execution or a leak. The vendored version and its licence are in
-  `THIRD_PARTY_NOTICES.md`.
+  execution or a leak. OSV records it against CodeMirror's commits up to 5.65.20
+  only, so asking about 5.65.21 returns nothing, but its `markdown.js` is
+  byte-identical to the affected one. The vendored version and its licence are
+  in `THIRD_PARTY_NOTICES.md`.
 
 ## Reporting
 
 Open a private security advisory on the GitHub repository, or write to its
 owner directly. Please include the request that reproduces
-the problem. Dependencies are checked against the RustSec database on every
-push and, locally, by `./scripts/check.sh` when `cargo-audit` is installed.
+the problem. Rust dependencies are checked against the RustSec database, and the
+vendored frontend libraries against OSV (`scripts/audit_vendored.py`), on every
+push, every Monday, and locally by `./scripts/check.sh`.
