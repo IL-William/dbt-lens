@@ -26,6 +26,9 @@ const S = {
   colFocus: null,             // {id, column} when the canvas shows columns
   colHighlight: '',           // column row to mark in the Columns table
   colSort: 'az',              // catalog: az | tests
+  sidecar: null,              // payload of /api/sidecar: the Snowflake lineage switch and its script
+  colAsk: 0,                  // bumped on every column click, so only the latest answer is drawn
+  colAnswered: false,         // Snowflake has answered once on this page, so no sign-in tab is expected
 };
 
 // ------------------------------------------------------------------ util --
@@ -1303,6 +1306,132 @@ const rerender = () => (S.graphMode === 'column' && S.colFocus)
   ? focusColumn(S.colFocus.id, S.colFocus.column)
   : (S.focus ? focusNode(S.focus) : undefined);
 
+// ------------------------------------------------------ snowflake lineage --
+/* Column lineage fetched from Snowflake on click. The server starts
+   tools/sf_lineage.py while the switch is on, and the script connects on the
+   first column click, never before (0016). */
+async function loadSidecar() {
+  try { S.sidecar = await api.get('/api/sidecar'); } catch { S.sidecar = null; }
+}
+
+const sidecarOn = () => !!(S.sidecar && S.sidecar.enabled);
+
+/* Label, tone and tooltip of the switch for one /api/sidecar payload. */
+function sidecarLabel(sc) {
+  if (!sc || !sc.enabled) {
+    return {
+      text: 'Snowflake lineage: off', tone: 'off',
+      title: 'Switch on to fetch a column\'s lineage from Snowflake when you click it. '
+        + 'dbt-lens starts tools/sf_lineage.py with your dbt profile, and nothing connects before the first click.',
+    };
+  }
+  const who = [sc.profile && `profile ${sc.profile}`, sc.target && `target ${sc.target}`, sc.role && `role ${sc.role}`]
+    .filter(Boolean).join(', ');
+  const python = sc.python ? `Python: ${sc.python}` : '';
+  switch (sc.state) {
+    case 'ready':
+      return { text: 'Snowflake lineage: on', tone: 'on',
+        title: [`Click a column to fetch its lineage${who ? ` (${who})` : ''}.`, python].filter(Boolean).join('\n') };
+    case 'busy':
+      return { text: 'Snowflake lineage: querying', tone: 'busy', title: ['Waiting for Snowflake.', python].filter(Boolean).join('\n') };
+    case 'starting':
+      return { text: 'Snowflake lineage: starting', tone: 'busy', title: 'Starting tools/sf_lineage.py' };
+    case 'failed':
+      return { text: 'Snowflake lineage: failed', tone: 'failed',
+        title: [sc.error, python, ...(sc.log || []).slice(-8)].filter(Boolean).join('\n') };
+    default:
+      return { text: 'Snowflake lineage: on', tone: 'on', title: 'The script starts with the next column click.' };
+  }
+}
+
+function sidecarSwitch() {
+  const b = document.createElement('button');
+  b.id = 'sidecar-switch';
+  b.className = 'btn sm sfswitch';
+  paintSidecarSwitch(b);
+  b.addEventListener('click', () => {
+    if (S.sidecar && S.sidecar.state === 'starting') return;
+    setSidecar(!sidecarOn());
+  });
+  return b;
+}
+
+function paintSidecarSwitch(b = $('#sidecar-switch')) {
+  if (!b) return;
+  const label = sidecarLabel(S.sidecar);
+  b.textContent = label.text;
+  b.dataset.tone = label.tone;
+  b.title = label.title;
+  // The script may still be starting in the background, as it does when
+  // dbt-lens starts with the switch already on.
+  if (S.sidecar && S.sidecar.state === 'starting') {
+    setTimeout(() => loadSidecar().then(() => paintSidecarSwitch()), 1500);
+  }
+}
+
+async function setSidecar(enabled) {
+  S.sidecar = Object.assign({}, S.sidecar, { enabled, state: enabled ? 'starting' : 'off', error: '', log: [] });
+  if (S.node) renderCatalog(S.node);
+  try {
+    S.sidecar = await api.send('/api/sidecar', 'POST', { enabled });
+    if (S.sidecar.state === 'failed') toast('Snowflake lineage: ' + S.sidecar.error, 'err');
+  } catch (e) {
+    toast('Snowflake lineage: ' + e.message, 'err');
+    await loadSidecar();
+  }
+  if (S.node) renderCatalog(S.node);
+}
+
+/* A column clicked in the Catalog, or double-clicked on the canvas. With the
+   switch on, its lineage is fetched from Snowflake before it is drawn; off, the
+   cache is drawn as it is. */
+async function openColumn(n, column) {
+  if (!sidecarOn()) return focusColumn(n.id, column);
+  const rel = lineageRelation(n, S.env);
+  if (!rel.text) return toast(`no Snowflake lineage for ${column}: ${rel.reason}`, 'err');
+  const ask = ++S.colAsk;
+  const status = $('#lineage-status');
+  showDock('lineage');
+  status.title = '';
+  status.textContent = `querying Snowflake for ${column} in ${rel.text}`
+    + (S.colAnswered ? '' : ' (the first query of a session may open a sign-in tab)');
+  S.sidecar = Object.assign({}, S.sidecar, { state: 'busy' });
+  paintSidecarSwitch();
+  try {
+    const res = await api.send('/api/collineage/fetch', 'POST', {
+      id: n.id, column, relation: rel.text, env: rel.file, up: +$('#up').value, down: +$('#down').value,
+    });
+    if (ask !== S.colAsk) return;
+    S.colAnswered = true;
+    if (res.added) {
+      applyMeta((await api.get('/api/meta')).meta);
+      if (S.node && S.node.id === n.id) {
+        S.colHighlight = column;
+        renderCatalog(await api.get('/api/node?id=' + encodeURIComponent(n.id)));
+      }
+    }
+    const outside = res.unmatched_total
+      ? ` · ${res.unmatched_total} object${res.unmatched_total > 1 ? 's' : ''} outside the project`
+      : '';
+    if (!res.up && !res.down) {
+      status.textContent = `Snowflake has no column lineage for ${column} in ${res.relation}${outside}`;
+      status.title = res.unmatched.join('\n');
+      return;
+    }
+    await focusColumn(n.id, column);
+    if (ask !== S.colAsk) return;
+    status.textContent += ` · from Snowflake, ${res.added} new${outside}`;
+    status.title = res.unmatched.length ? 'Not nodes of this project:\n' + res.unmatched.join('\n') : '';
+  } catch (e) {
+    if (ask !== S.colAsk) return;
+    status.textContent = `Snowflake: ${e.message}`;
+    toast('Snowflake lineage: ' + e.message, 'err');
+  } finally {
+    await loadSidecar();
+    paintSidecarSwitch();
+  }
+}
+
 /* Only the materializations present in the current graph, so the legend stays
    short and always matches what is drawn. */
 function paintLegend(nodes) {
@@ -1941,6 +2070,23 @@ function resolvedRelation(rows, builtRelation, file) {
   return { text: names.map(write).join('.'), reason: '' };
 }
 
+/* The relation Snowflake is asked about for a column's lineage, the .env file
+   actually used, or why there is none. With no file chosen it is where this
+   manifest's target built the node, since that object exists. A chosen file
+   gives the relation the Location table resolves, and a file this node was
+   not resolved against falls back to the manifest, as that table does. */
+function lineageRelation(n, env) {
+  if (!n.relation) {
+    return { text: '', file: '', reason: n.materialized === 'ephemeral'
+      ? `${n.name} is ephemeral, so it is not in the warehouse`
+      : `${n.name} has no relation in the warehouse` };
+  }
+  const file = env && n.location && n.location.envs && n.location.envs[env] ? env : '';
+  if (!file) return { text: n.relation, file: '', reason: '' };
+  const rel = resolvedRelation(locationRows(n.location, file), n.relation, file);
+  return { text: rel.text, file, reason: rel.reason };
+}
+
 function catalogLocation(body, n) {
   // A chosen file this node was not resolved against (none discovered at the
   // time, or the file was removed) quietly falls back to manifest mode.
@@ -2178,13 +2324,7 @@ function catalogColumns(body, n) {
   note.textContent = untyped === n.columns.length
     ? 'no types: run dbt compile --write-catalog to pull them from Snowflake'
     : `${n.columns.length - untyped}/${n.columns.length} typed`;
-  tools.append(note);
-  if (!(S.meta && S.meta.cll_edges)) {
-    const hint = document.createElement('span');
-    hint.textContent = '  ·  no column lineage: python3 tools/sf_lineage.py dump';
-    hint.title = 'dbt-lens reads target/column_lineage.json, written by the Snowflake sidecar';
-    tools.appendChild(hint);
-  }
+  tools.append(note, sidecarSwitch());
   tools.append(Object.assign(document.createElement('div'), { className: 'grow' }));
   tools.appendChild(document.createTextNode('Sort by'));
   for (const [key, label] of [['az', 'A-Z'], ['tests', 'Tests']]) {
@@ -2201,7 +2341,9 @@ function catalogColumns(body, n) {
   if (S.colSort === 'tests') cols.sort((a, b) => b.tests.length - a.tests.length || a.name.localeCompare(b.name));
   else cols.sort((a, b) => a.name.localeCompare(b.name));
 
-  const linked = n.columns.some((c) => c.up || c.down);
+  // With the switch on, every column can be asked about, not just the cached ones.
+  const live = sidecarOn();
+  const linked = live || n.columns.some((c) => c.up || c.down);
   const table = document.createElement('table');
   table.className = 'cols';
   const head = document.createElement('tr');
@@ -2247,11 +2389,13 @@ function catalogColumns(body, n) {
         const u = document.createElement('b'); u.textContent = `\u2190${c.up}`;
         const dn = document.createElement('b'); dn.textContent = `${c.down}\u2192`;
         lin.append(u, document.createTextNode('  '), dn);
-        tr.classList.add('c-linked');
-        tr.title = `column lineage for ${c.name}`;
-        tr.addEventListener('click', () => focusColumn(n.id, c.name));
       } else {
         lin.append(nul());
+      }
+      if (c.up || c.down || live) {
+        tr.classList.add('c-linked');
+        tr.title = live ? `fetch the lineage of ${c.name} from Snowflake` : `column lineage for ${c.name}`;
+        tr.addEventListener('click', () => openColumn(n, c.name));
       }
       tr.appendChild(lin);
     }
@@ -2533,6 +2677,11 @@ async function boot() {
     },
     onOpen: (n) => {
       const { node: nodeId, column } = splitColId(n.id);
+      if (column && sidecarOn()) {
+        return api.get('/api/node?id=' + encodeURIComponent(nodeId))
+          .then((detail) => openColumn(detail, column))
+          .catch((e) => toast('column lineage: ' + e.message, 'err'));
+      }
       if (column) return focusColumn(nodeId, column);
       focusNode(nodeId);
       if (n.file) { openFile(n.file, { focusLineage: false }); revealInTree(n.file); }
@@ -2550,6 +2699,7 @@ async function boot() {
 
   const info = await api.get('/api/meta');
   applyMeta(info.meta);
+  await loadSidecar();
   $('#status-shell').textContent = info.shell;
   const v = info.venv || {};
   const venvEl = $('#status-venv');

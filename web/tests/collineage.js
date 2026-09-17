@@ -3,6 +3,8 @@
 var app = read('web/app.js');
 eval(app.slice(app.indexOf('function splitColId'), app.indexOf('/* Column-level lineage')));
 
+eval(app.slice(app.indexOf('function sidecarLabel'), app.indexOf('function sidecarSwitch')));
+
 var lin = read('web/lineage.js');
 eval(lin.slice(lin.indexOf('function subtitle(n)'), lin.indexOf('  function init(')));
 
@@ -43,3 +45,20 @@ check('disabled model',
 check('a single test is singular',
       subtitle({ kind: 'model', materialized: 'table', schema: 's', tests: 1 }),
       'table  ·  s  ·  1 test');
+
+print('\n--- Snowflake lineage switch ---');
+check('no payload reads as off', sidecarLabel(null).text, 'Snowflake lineage: off');
+check('off explains that nothing connects before a click',
+      sidecarLabel({ enabled: false, state: 'off' }).title.indexOf('nothing connects before the first click') > 0, true);
+var ready = sidecarLabel({ enabled: true, state: 'ready', profile: 'shop', target: 'dev', role: 'transformer',
+                           python: '/work/shop/.venv/bin/python' });
+check('ready is on', ready.text + ' / ' + ready.tone, 'Snowflake lineage: on / on');
+check('ready names the connection and the Python that runs',
+      ready.title, 'Click a column to fetch its lineage (profile shop, target dev, role transformer).\nPython: /work/shop/.venv/bin/python');
+var failed = sidecarLabel({ enabled: true, state: 'failed', error: 'no profiles.yml at /home/me/.dbt/profiles.yml',
+                            log: ['Traceback (most recent call last):', 'sf_lineage: no profiles.yml at /home/me/.dbt/profiles.yml'] });
+check('failed is its own tone', failed.tone, 'failed');
+check('failed shows the error first, then the last lines of the script',
+      failed.title, 'no profiles.yml at /home/me/.dbt/profiles.yml\nTraceback (most recent call last):\nsf_lineage: no profiles.yml at /home/me/.dbt/profiles.yml');
+check('switched on but not started yet still reads as on',
+      sidecarLabel({ enabled: true, state: 'off' }).text, 'Snowflake lineage: on');

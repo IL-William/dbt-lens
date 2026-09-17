@@ -165,6 +165,30 @@ var noDatabase = locationRows({
 check('a database left to the target profile gives no relation',
       resolvedRelation(noDatabase, 'dev_db.marts.orders', '').reason.indexOf('target profile') > 0, true);
 
+print('\n--- relation asked about for Snowflake column lineage ---');
+var built = { name: 'orders', materialized: 'table', relation: 'dev_db.dbt_jdoe.orders', location: withEnvs };
+check('the manifest asks about the relation its target built, which exists',
+      lineageRelation(built, ''), { text: 'dev_db.dbt_jdoe.orders', file: '', reason: '' });
+check('a chosen file asks about the relation it resolves',
+      lineageRelation(built, '.env.uat'), { text: 'MART_UAT.marts.orders', file: '.env.uat', reason: '' });
+check('a file this node was not resolved against falls back to the manifest',
+      lineageRelation(built, '.env.nope'), { text: 'dev_db.dbt_jdoe.orders', file: '', reason: '' });
+var qaMissing = {
+  written: { database: "{{ env_var('DBT_DB_MART') }}", schema: 'marts', alias: '' },
+  parsed:  { database: 'MART_CI', schema: 'marts', alias: '' },
+  built:   { database: 'MART_CI', schema: 'marts', alias: 'orders' },
+  envs: { '.env.qa': {
+    place:  { database: '', schema: 'marts', alias: '' },
+    status: { database: { kind: 'missing', vars: ['DBT_DB_MART'] }, schema: { kind: 'literal' }, alias: { kind: 'literal' } },
+  } },
+};
+check('an environment that cannot place the node says why, and asks nothing',
+      lineageRelation({ name: 'orders', relation: 'MART_CI.marts.orders', location: qaMissing }, '.env.qa'),
+      { text: '', file: '.env.qa', reason: 'DBT_DB_MART is not defined in .env.qa' });
+check('an ephemeral model has nothing to ask about',
+      lineageRelation({ name: 'int_orders', materialized: 'ephemeral', relation: '' }, '.env.uat').reason,
+      'int_orders is ephemeral, so it is not in the warehouse');
+
 print('\n--- environment colours ---');
 var toneSrc = read('web/app.js');
 eval(toneSrc.slice(toneSrc.indexOf('function envTone'), toneSrc.indexOf('function envDisplayName')));

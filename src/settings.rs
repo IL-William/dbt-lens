@@ -34,6 +34,9 @@ pub struct Settings {
     /// Where a fresh browser tab starts; each tab then keeps its own choice.
     #[serde(default)]
     pub selected: Option<String>,
+    /// Snowflake column lineage on click. Off unless the user turned it on (0016).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub snowflake_lineage: bool,
 }
 
 fn looks_absolute(value: &str, windows: bool) -> bool {
@@ -109,7 +112,7 @@ pub fn file_name(root: &str, windows: bool) -> String {
     format!("{slug}-{:016x}.json", fnv1a64(norm.as_bytes()))
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -272,6 +275,28 @@ mod tests {
 
         std::fs::write(dir.join("p.json"), b"{ not json").unwrap();
         assert!(store.load().envs.is_empty(), "corrupt settings fall back to defaults");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn snowflake_lineage_stays_off_unless_it_was_turned_on() {
+        let dir = std::env::temp_dir().join(format!("dbt-lens-settings-sf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store { path: Some(dir.join("p.json")), project: "/work/shop".into(), lock: Default::default() };
+
+        // A file written before the switch existed.
+        std::fs::write(dir.join("p.json"), br#"{"version":1,"project":"/work/shop","envs":{},"selected":".env.uat"}"#).unwrap();
+        assert!(!store.load().snowflake_lineage);
+
+        store.update(|s| s.snowflake_lineage = true).await.unwrap();
+        let loaded = store.load();
+        assert!(loaded.snowflake_lineage);
+        assert_eq!(loaded.selected.as_deref(), Some(".env.uat"), "switching must not touch the selection");
+
+        store.update(|s| s.snowflake_lineage = false).await.unwrap();
+        let text = std::fs::read_to_string(dir.join("p.json")).unwrap();
+        assert!(!text.contains("snowflake_lineage"), "off is the default, so it is not written: {text}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1,6 +1,6 @@
 # 0008. Column lineage arrives as a cache file, not a warehouse connection
 
-Date: 2026-09-12 · Status: accepted
+Date: 2026-09-12 · Status: superseded by 0016
 
 **Trigger:** read before making the server talk to Snowflake, or before
 changing the shape of the column-lineage file.

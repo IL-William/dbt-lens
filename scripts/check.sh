@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Everything that has to pass before a change is done: Rust tests, the browser
-# harnesses, and a syntax check on the frontend the harnesses cannot catch.
+# Everything that has to pass before a change is done: Rust tests, both audits,
+# the Snowflake script's tests, the browser harnesses, and a syntax check on the
+# frontend the harnesses cannot catch.
 #
 # JavaScriptCore ships with macOS. Elsewhere, set JSC to a JavaScript shell
 # (jsc, d8, node) or accept that the browser half is skipped.
@@ -47,6 +48,23 @@ else
     2) echo "SKIPPED: OSV unreachable" ;;
     *) echo "VENDORED FAILED"; failed=$((failed + 1)) ;;
   esac
+fi
+
+echo
+echo "== snowflake script =="
+# tools/sf_lineage.py against a fake connector and a fake PyYAML, so it needs no
+# warehouse and nothing installed, only a Python recent enough for the script.
+if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' > /dev/null 2>&1; then
+  echo "SKIPPED: no python3 at 3.10 or later"
+else
+  out=$(python3 tools/test_sf_lineage.py 2>&1)
+  if [ $? -eq 0 ]; then
+    echo "snowflake script ok ($(printf '%s\n' "$out" | sed -n 's/^Ran \([0-9]*\) tests.*/\1/p') tests)"
+  else
+    printf '%s\n' "$out" | tail -30
+    echo "SNOWFLAKE SCRIPT FAILED"
+    failed=$((failed + 1))
+  fi
 fi
 
 echo

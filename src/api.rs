@@ -1,6 +1,6 @@
 //! HTTP + WebSocket surface. Everything the browser UI talks to lives here.
 
-use crate::collin::RawColLineage;
+use crate::collin::{self, RawColLineage};
 use crate::compiled;
 use crate::envs;
 use crate::files;
@@ -8,6 +8,7 @@ use crate::git::{self, GitInfo};
 use crate::graph::{ColRef, Graph, Kind, Place};
 use crate::manifest::{RawCatalog, RawManifest};
 use crate::pty::{FromPty, PtySession, ShellSpec};
+use crate::sidecar;
 use crate::venv::VenvInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -37,6 +38,15 @@ pub struct AppState {
     pub graph: RwLock<Arc<Graph>>,
     pub shell: ShellSpec,
     pub git: tokio::sync::Mutex<Option<(std::time::Instant, GitInfo)>>,
+    /// The Snowflake script, running only while the user has it switched on (0016).
+    pub sidecar: sidecar::Sidecar,
+    /// Held while the column-lineage cache is merged and written, and while the
+    /// watcher reloads: a click's edges must land in the graph that stays.
+    pub cll_lock: tokio::sync::Mutex<()>,
+    /// Modification times of manifest, catalog and cache already acted on. A
+    /// click records the cache it wrote, or the watcher would re-read the whole
+    /// manifest for it three seconds later.
+    pub seen: std::sync::Mutex<[u64; 3]>,
 }
 
 #[derive(rust_embed::RustEmbed)]
@@ -93,6 +103,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/compiled", get(compiled_sql))
         .route("/api/lineage", get(lineage))
         .route("/api/collineage", get(col_lineage))
+        .route("/api/collineage/fetch", post(fetch_col_lineage))
+        .route("/api/sidecar", get(sidecar_status).post(sidecar_switch))
         .route("/api/dir", get(dir))
         .route("/api/files", get(file_search))
         .route("/api/file", get(read_file).put(write_file))
@@ -226,6 +238,7 @@ async fn meta(State(st): State<Arc<AppState>>) -> Response {
 }
 
 async fn reload(State(st): State<Arc<AppState>>) -> Response {
+    let _cache = st.cll_lock.lock().await;
     let (path, cat, cll) = (st.manifest_path.clone(), st.catalog_path.clone(), st.cll_path.clone());
     match tokio::task::spawn_blocking(move || load_graph(&path, &cat, &cll)).await {
         Ok(Ok(g)) => {
@@ -711,6 +724,178 @@ async fn col_lineage(State(st): State<Arc<AppState>>, Query(q): Query<ColLineage
     Json(sub).into_response()
 }
 
+// ------------------------------------------------------------- snowflake ----
+
+#[derive(serde::Serialize)]
+struct SidecarBody {
+    enabled: bool,
+    #[serde(flatten)]
+    status: sidecar::Status,
+}
+
+async fn sidecar_status(State(st): State<Arc<AppState>>) -> Response {
+    Json(SidecarBody { enabled: st.sidecar.enabled(), status: st.sidecar.status() }).into_response()
+}
+
+#[derive(Deserialize)]
+struct SwitchBody {
+    enabled: bool,
+}
+
+/// Switches Snowflake lineage on or off for this project. On starts the script,
+/// which checks its setup and then waits: no connection opens until a column
+/// is clicked (0016).
+async fn sidecar_switch(State(st): State<Arc<AppState>>, Json(b): Json<SwitchBody>) -> Response {
+    st.sidecar.set_enabled(b.enabled);
+    // Remembered like the environment selection. Without a configuration
+    // directory the switch still holds until dbt-lens stops.
+    if let Err(e) = st.settings.update(|s| s.snowflake_lineage = b.enabled).await {
+        eprintln!("  snowflake lineage switch not saved: {e}");
+    }
+    let status = if b.enabled { st.sidecar.start_for(&st.root, &st.venv).await } else { st.sidecar.stop().await };
+    Json(SidecarBody { enabled: st.sidecar.enabled(), status }).into_response()
+}
+
+#[derive(Deserialize)]
+struct FetchBody {
+    id: String,
+    column: String,
+    /// The clicked node's relation as the browser shows it for the selected
+    /// environment, so Snowflake is asked about exactly what the user sees.
+    relation: String,
+    /// The selected `.env` file, empty for the manifest.
+    #[serde(default)]
+    env: String,
+    #[serde(default = "two")]
+    up: u32,
+    #[serde(default = "two")]
+    down: u32,
+}
+
+#[derive(serde::Serialize)]
+struct Fetched {
+    relation: String,
+    /// Column pairs Snowflake returned, both directions together.
+    rows: usize,
+    /// Edges the cache did not have yet.
+    added: usize,
+    /// Edges on the clicked column now, from the cache as it stands.
+    up: usize,
+    down: usize,
+    /// Objects Snowflake named that are no node of this project, the first 20.
+    unmatched: Vec<String>,
+    unmatched_total: usize,
+}
+
+/// Column lineage from Snowflake around one clicked column, merged into the
+/// cache file and into the graph in memory. POST and never GET: a GET passes
+/// the guard on its Host alone, so any page could run warehouse queries
+/// through an image tag (0015, 0016).
+async fn fetch_col_lineage(State(st): State<Arc<AppState>>, Json(b): Json<FetchBody>) -> Response {
+    if !st.sidecar.enabled() {
+        return (StatusCode::CONFLICT, "Snowflake lineage is switched off").into_response();
+    }
+    if !collin::valid_relation(&b.relation) {
+        return (StatusCode::BAD_REQUEST, "not a database.schema.object relation").into_response();
+    }
+    if b.column.trim().is_empty() || b.column.len() > 256 || b.column.chars().any(char::is_control) {
+        return (StatusCode::BAD_REQUEST, "not a column name").into_response();
+    }
+    if !b.env.is_empty() && !valid_env_file(&b.env) {
+        return (StatusCode::BAD_REQUEST, "not an env file name").into_response();
+    }
+    {
+        // Refused before any query: a result that cannot be stored is not
+        // worth a sign-in tab.
+        let graph = st.graph.read().await;
+        if !graph.index.contains_key(&b.id) {
+            return (StatusCode::NOT_FOUND, "unknown node").into_response();
+        }
+        if graph.meta.cll_edges > 0 && graph.meta.cll_source != "snowflake" {
+            return (StatusCode::CONFLICT, collin::other_source(&st.cll_path, &graph.meta.cll_source)).into_response();
+        }
+    }
+    // The file's values stay on the server: they only decide which node an
+    // object stands for.
+    let vars = if b.env.is_empty() {
+        None
+    } else {
+        let (root, file) = (st.root.clone(), b.env.clone());
+        match tokio::task::spawn_blocking(move || envs::discover(&root).into_iter().find(|f| f.file == file)).await {
+            Ok(Some(found)) => Some(found.vars),
+            _ => return (StatusCode::NOT_FOUND, "that env file is no longer in the project").into_response(),
+        }
+    };
+
+    if !st.sidecar.is_up() {
+        let status = st.sidecar.start_for(&st.root, &st.venv).await;
+        if status.state != "ready" {
+            let why = if status.error.is_empty() { "Snowflake lineage is switched off".to_string() } else { status.error };
+            return (StatusCode::BAD_GATEWAY, why).into_response();
+        }
+    }
+    let mut rows = Vec::new();
+    for (direction, depth) in [("UPSTREAM", b.up), ("DOWNSTREAM", b.down)] {
+        if depth == 0 {
+            continue;
+        }
+        // GET_LINEAGE goes five levels deep at most.
+        match st.sidecar.query(&b.relation, &b.column, direction, depth.min(5)).await {
+            Ok(found) => rows.extend(found),
+            Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
+        }
+    }
+
+    let total = rows.len();
+    let graph = st.graph.read().await.clone();
+    let Some(&focus) = graph.index.get(&b.id) else {
+        return (StatusCode::NOT_FOUND, "unknown node").into_response();
+    };
+    let relation = b.relation.clone();
+    // The graph moves into the task and is dropped with it, so the merge below
+    // can usually update the graph in place instead of copying it.
+    let mapped = tokio::task::spawn_blocking(move || collin::edges_for(&graph, &rows, focus, &relation, vars.as_ref())).await;
+    let Ok((edges, unmatched)) = mapped else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "matching the lineage to the project failed").into_response();
+    };
+
+    let _cache = st.cll_lock.lock().await;
+    let (path, target) = (st.cll_path.clone(), st.sidecar.status().target);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let merged = match tokio::task::spawn_blocking(move || collin::add_to_file(&path, edges, &target, now)).await {
+        Ok(Ok(merged)) => merged,
+        Ok(Err(e)) => return (StatusCode::CONFLICT, e).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let mut added = 0;
+    if let Some((cache, n)) = merged {
+        added = n;
+        let mtime = mtime_secs(&st.cll_path);
+        if let Ok(mut seen) = st.seen.lock() {
+            seen[2] = mtime;
+        }
+        let mut current = st.graph.write().await;
+        let graph = Arc::make_mut(&mut current);
+        graph.merge_col_lineage(cache, mtime);
+        graph.meta.cll_file = st.cll_path.display().to_string();
+    }
+    let graph = st.graph.read().await.clone();
+    let (up, down) = match (graph.cll.as_ref(), graph.index.get(&b.id)) {
+        (Some(cll), Some(&node)) => graph.col_slot(node, &b.column).map_or((0, 0), |col| cll.degree(ColRef { node, col })),
+        _ => (0, 0),
+    };
+    Json(Fetched {
+        relation: b.relation,
+        rows: total,
+        added,
+        up,
+        down,
+        unmatched_total: unmatched.len(),
+        unmatched: unmatched.into_iter().take(20).collect(),
+    })
+    .into_response()
+}
+
 #[derive(Deserialize)]
 struct PathQuery {
     #[serde(default)]
@@ -999,25 +1184,28 @@ async fn terminal_loop(socket: WebSocket, st: Arc<AppState>, q: TermQuery) {
     session.kill();
 }
 
-/// Background poll: reloads whenever dbt rewrites manifest.json or catalog.json.
+/// Background poll: reloads whenever dbt rewrites manifest.json or catalog.json,
+/// or something other than a click rewrites the column-lineage cache.
 pub async fn watch_artifacts(st: Arc<AppState>) {
-    let (mut last_m, mut last_c, mut last_l) = {
-        let g = st.graph.read().await;
-        (g.meta.manifest_mtime, g.meta.catalog_mtime, g.meta.cll_mtime)
-    };
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        // Held through the reload: a click merging fetched lineage meanwhile
+        // would otherwise merge into the graph this reload is about to replace.
+        let _cache = st.cll_lock.lock().await;
         let (mp, cp, lp) = (st.manifest_path.clone(), st.catalog_path.clone(), st.cll_path.clone());
-        let stamps = tokio::task::spawn_blocking(move || (mtime_secs(&mp), mtime_secs(&cp), mtime_secs(&lp)))
+        let stamps = tokio::task::spawn_blocking(move || [mtime_secs(&mp), mtime_secs(&cp), mtime_secs(&lp)])
             .await
-            .unwrap_or((0, 0, 0));
-        if (stamps.0 == 0 || stamps.0 == last_m)
-            && (stamps.1 == 0 || stamps.1 == last_c)
-            && (stamps.2 == 0 || stamps.2 == last_l)
-        {
+            .unwrap_or([0, 0, 0]);
+        let changed = st.seen.lock().is_ok_and(|mut seen| {
+            let changed = stamps.iter().zip(seen.iter()).any(|(now, before)| *now != 0 && now != before);
+            if changed {
+                *seen = stamps;
+            }
+            changed
+        });
+        if !changed {
             continue;
         }
-        (last_m, last_c, last_l) = stamps;
         // Give dbt a moment to finish writing.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let (mp, cp, lp) = (st.manifest_path.clone(), st.catalog_path.clone(), st.cll_path.clone());
@@ -1099,6 +1287,9 @@ mod tests {
             graph: RwLock::new(Arc::new(Graph::build(Default::default(), &manifest, 0, 0))),
             git: tokio::sync::Mutex::new(None),
             shell: ShellSpec { program: "/bin/sh".into(), args: Vec::new() },
+            sidecar: sidecar::Sidecar::new(false, Default::default()),
+            cll_lock: tokio::sync::Mutex::new(()),
+            seen: std::sync::Mutex::new([0; 3]),
         });
         let task = tokio::spawn(async move {
             axum::serve(listener, router(state)).await.unwrap();
@@ -1189,6 +1380,40 @@ mod tests {
         assert!(status_of(port, ws(Some("https://evil.example"))).await.ends_with("403 Forbidden"));
         assert!(status_of(port, ws(None)).await.ends_with("403 Forbidden"));
         assert!(status_of(port, ws(Some(&own))).await.ends_with("101 Switching Protocols"));
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn with_json(method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> String {
+        let mut r = format!("{method} {path} HTTP/1.1\r\n");
+        for (k, v) in headers {
+            r.push_str(&format!("{k}: {v}\r\n"));
+        }
+        r.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()));
+        r
+    }
+
+    // Both routes can lead to warehouse queries under the user's own identity,
+    // so no other page may reach them, and nothing runs while switched off.
+    #[tokio::test]
+    async fn snowflake_lineage_answers_only_this_page_and_only_when_switched_on() {
+        let root = temp_project("snowflake");
+        let (port, server) = serve(&root).await;
+        let host = format!("127.0.0.1:{port}");
+        let own = format!("http://127.0.0.1:{port}");
+        let fetch = r#"{"id":"model.shop.dim_customers","column":"customer_id","relation":"analytics.marts.dim_customers"}"#;
+
+        for (path, body) in [("/api/sidecar", r#"{"enabled":true}"#), ("/api/collineage/fetch", fetch)] {
+            let foreign = with_json("POST", path, &[("Host", &host), ("Origin", "https://evil.example")], body);
+            assert!(status_of(port, foreign).await.ends_with("403 Forbidden"), "{path}");
+        }
+        // A plain read cannot start anything.
+        assert!(status_of(port, get("/api/collineage/fetch", &[("Host", &host)])).await.ends_with("405 Method Not Allowed"));
+        assert!(status_of(port, get("/api/sidecar", &[("Host", &host)])).await.ends_with("200 OK"));
+
+        let off = with_json("POST", "/api/collineage/fetch", &[("Host", &host), ("Origin", &own)], fetch);
+        assert!(status_of(port, off).await.ends_with("409 Conflict"));
 
         server.abort();
         let _ = std::fs::remove_dir_all(&root);

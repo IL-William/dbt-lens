@@ -43,6 +43,22 @@ fn first_line(venv: &Path, exe: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
+/// The interpreter inside a virtual environment.
+pub fn python_in(venv: &Path) -> PathBuf {
+    bin(venv, "python")
+}
+
+/// Whether the Snowflake connector is installed, looked up on disk so that
+/// nothing has to be started to find out.
+pub fn has_snowflake_connector(venv: &Path) -> bool {
+    let installed = |site: PathBuf| site.join("snowflake").join("connector").is_dir();
+    // Windows: Lib\site-packages. Elsewhere: lib/pythonX.Y/site-packages.
+    installed(venv.join("Lib").join("site-packages"))
+        || std::fs::read_dir(venv.join("lib"))
+            .map(|entries| entries.flatten().any(|e| installed(e.path().join("site-packages"))))
+            .unwrap_or(false)
+}
+
 fn is_venv(p: &Path) -> bool {
     p.join("pyvenv.cfg").exists() || bin(p, "python").exists()
 }
