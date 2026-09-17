@@ -1,0 +1,48 @@
+# Security
+
+## What dbt-lens assumes
+
+dbt-lens is a local tool. One person runs it on their own machine, against a
+project they already have full access to, and it runs with that person's
+rights: the terminal is their shell, the git buttons use their credentials,
+the editor reads and writes their files.
+
+- **The server listens on `127.0.0.1` only.** Other machines cannot reach it.
+- **The browser is not trusted.** Any web page can talk to localhost, so every
+  request must carry a `Host` naming this server and, for anything that is not
+  a plain read, an `Origin` that is this server's own page. Everything else is
+  refused with `403`. The WebSocket terminal requires the `Origin`.
+- **Every reply carries a content security policy** that allows nothing from
+  another origin and refuses framing, so the terminal cannot be put under an
+  invisible overlay on someone else's page.
+- **Every file path is confined to the opened project.** `..`, absolute paths,
+  drive letters and symlinks pointing out are refused.
+- **The editor reads the whole project, `.env` included.** That is what an
+  editor is for. The environments panel, by contrast, never returns a `.env`
+  value, only names and counts.
+- **No outbound network calls**, apart from the git commands you click.
+
+## Out of scope
+
+- The project you open is yours. Its git hooks run when you commit, as they
+  would from the command line.
+- Anything already running as your user on the same machine.
+- Exposing the port to the network with a tunnel or a proxy. It has no
+  authentication and was never meant to be reached that way.
+
+## Known issues
+
+- **CodeMirror 5.65.16 carries CVE-2025-6493**, a regular expression that goes
+  quadratic on crafted input in the Markdown mode. It is fixed only in
+  CodeMirror 6, which this project does not use and will not adopt lightly
+  (0004). Reaching it means opening a hostile `.md` file that is already in the
+  project you opened, and the result is a frozen browser tab, not code
+  execution or a leak. The vendored version and its licence are in
+  `THIRD_PARTY_NOTICES.md`.
+
+## Reporting
+
+Open a private security advisory on the GitHub repository, or write to its
+owner directly. Please include the request that reproduces
+the problem. Dependencies are checked against the RustSec database on every
+push and, locally, by `./scripts/check.sh` when `cargo-audit` is installed.

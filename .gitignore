@@ -1,0 +1,20 @@
+/target
+dbt-lens.toml
+.DS_Store
+/dist
+__pycache__/
+*.pyc
+
+# Never committed, whatever the directory: this tool is used next to dbt
+# projects, and a stray one here would be public the moment the repo is (0014).
+.env
+.env.*
+*.pem
+*.p8
+*.key
+
+# Personal editor and agent settings. .claude/settings.json is shared on
+# purpose; the .local.json beside it is not.
+.claude/settings.local.json
+.vscode/
+.idea/

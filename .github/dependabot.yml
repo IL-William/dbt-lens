@@ -1,0 +1,12 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # Lockfile bumps only: a version range change is a decision, not a chore (0003).
+    versioning-strategy: lockfile-only
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
