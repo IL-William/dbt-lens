@@ -1336,6 +1336,7 @@ const rerender = () => (S.graphMode === 'column' && S.colFocus)
    first column click, never before (0016). */
 async function loadSidecar() {
   try { S.sidecar = await api.get('/api/sidecar'); } catch { S.sidecar = null; }
+  paintProfileChip();
 }
 
 const sidecarOn = () => !!(S.sidecar && S.sidecar.enabled);
@@ -1405,6 +1406,7 @@ function paintSidecarSwitch(b = $('#sidecar-switch')) {
 
 async function setSidecar(enabled) {
   S.sidecar = Object.assign({}, S.sidecar, { enabled, state: enabled ? 'starting' : 'off', error: '', log: [] });
+  paintProfileChip();
   if (S.node) renderCatalog(S.node);
   try {
     S.sidecar = await api.send('/api/sidecar', 'POST', { enabled });
@@ -1413,6 +1415,9 @@ async function setSidecar(enabled) {
     toast('Snowflake lineage: ' + e.message, 'err');
     await loadSidecar();
   }
+  // The answer carries the file the script named, so the bar can say it now
+  // rather than on the next poll.
+  paintProfileChip();
   if (S.node) renderCatalog(S.node);
 }
 
@@ -1439,6 +1444,19 @@ function profileLink() {
   a.title = `${path}\nThe dbt profile the Snowflake script reads. Click to open it here.`;
   a.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openProfiles(); });
   return a;
+}
+
+/* The profile the connection comes from is a fact about the project, so it sits
+   in the top bar, not only where a column is clicked. Known once the script has
+   run and said which file it reads. */
+function paintProfileChip() {
+  const host = $('#profile-chip');
+  host.textContent = '';
+  const link = profileLink();
+  if (link) host.append(link);
+  // At startup the script may still be on its way to saying which file it
+  // reads, and nothing else would come back to fill this in.
+  else if (S.sidecar && S.sidecar.state === 'starting') setTimeout(loadSidecar, 1500);
 }
 
 /* The profile lives outside the project, so it has its own route rather than a
@@ -2428,8 +2446,6 @@ function catalogColumns(body, n) {
     if (hint.tone === 'failed') span.title = ((S.sidecar && S.sidecar.log) || []).join('\n');
     tools.appendChild(span);
   }
-  const link = profileLink();
-  if (link) tools.append(document.createTextNode('  ·  '), link);
   tools.append(Object.assign(document.createElement('div'), { className: 'grow' }));
   tools.appendChild(document.createTextNode('Sort by'));
   for (const [key, label] of [['az', 'A-Z'], ['tests', 'Tests']]) {

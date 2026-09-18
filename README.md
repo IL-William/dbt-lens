@@ -296,8 +296,8 @@ that needs no network: a Python with the connector, your profile, its target
 and role, all named in the switch's tooltip. Nothing connects until you click a
 column, and the first click of a session may open a sign-in tab.
 
-Next to the switch, `profiles.yml` names the file the script read, and opens it
-in the editor. It is the one file outside the project dbt-lens opens, and only
+In the top bar, next to the model counts, `profiles.yml` names the file the
+script read, and opens it in the editor. It is the one file outside the project dbt-lens opens, and only
 because the script says which one it is (0017). Saving it restarts the script,
 since the profile is read once, when it starts. When Snowflake refuses the
 connection, the message points at that file rather than leaving you with an

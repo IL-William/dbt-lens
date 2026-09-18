@@ -608,6 +608,7 @@ kbd {
 .cols .c-ask { color: var(--fg-dim); font-style: italic; }
 .cols tr.c-linked:hover .c-ask { color: var(--accent); font-style: normal; }
 .filelink { color: var(--accent); cursor: pointer; text-decoration: none; }
+#profile-chip .filelink { font: 11px var(--mono); }
 .filelink:hover { text-decoration: underline; }
 .cols .c-name { font-family: var(--mono); white-space: nowrap; }
 .cols .c-type { font-family: var(--mono); color: var(--source); white-space: nowrap; }
