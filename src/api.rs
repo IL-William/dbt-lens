@@ -767,7 +767,7 @@ async fn list_vars(State(st): State<Arc<AppState>>, Query(q): Query<VarsQuery>) 
             let (value, cell) = envs::resolve(&v.raw, "", &vars);
             // Reading from the file and falling back to the default written in
             // the call both end up as Env, and the card has to tell them apart.
-            row.default_used = cell.kind == envs::Status::Env && cell.vars.iter().any(|n| !vars.contains_key(n));
+            row.default_used = envs::used_default(&cell, &vars);
             row.redacted = row.redacted || cell.vars.iter().any(|n| envs::sensitive_name(n));
             row.status = Some(cell.kind);
             row.vars = cell.vars;

@@ -187,6 +187,14 @@ pub fn sensitive_name(name: &str) -> bool {
     })
 }
 
+/// Whether an expression's value came from the defaults written in its
+/// `env_var()` calls rather than from the file. `all`, not `any`: an expression
+/// reading two variables of which the file defines one is not "the default",
+/// and saying so would be a claim the payload cannot support.
+pub fn used_default(cell: &Cell, vars: &Vars) -> bool {
+    cell.kind == Status::Env && !cell.vars.is_empty() && cell.vars.iter().all(|n| !vars.contains_key(n))
+}
+
 /// One environment variable by name, for the editor's `env_var()` hover. Same
 /// secret guard as `substitute`, and the same vocabulary, so a caller cannot
 /// reach a value through this door that the other one refuses.
@@ -738,6 +746,17 @@ mod tests {
     fn resolve_ignores_jinja_comments() {
         let (value, cell) = resolve("{# pick the mart #}{{ env_var('A') }}", "", &vars(&[("A", "DB")]));
         assert_eq!((value.as_str(), cell.kind), ("DB", Status::Env));
+    }
+
+    #[test]
+    fn used_default_is_all_not_any() {
+        let one = vars(&[("DBT_A", "from_file")]);
+        let (_, mixed) = resolve("{{ env_var('DBT_A') }}-{{ env_var('DBT_B', 'd') }}", "", &one);
+        assert!(!used_default(&mixed, &one), "one name came from the file, so this is not the default");
+        let (_, both) = resolve("{{ env_var('DBT_X', 'd') }}-{{ env_var('DBT_Y', 'e') }}", "", &vars(&[]));
+        assert!(used_default(&both, &vars(&[])));
+        let (_, from_file) = resolve("{{ env_var('DBT_A') }}", "", &one);
+        assert!(!used_default(&from_file, &one));
     }
 
     #[test]

@@ -62,8 +62,16 @@ const api = {
    hover card. The server rediscovers the .env files and walks the graph twice on
    every request, which a click could afford and a hover cannot. The promise is
    what is stored, not the value: a hover and the click that follows it 30ms
-   later are then one request rather than two. */
+   later are then one request rather than two.
+
+   The entry expires, because the server reloads the graph by itself when dbt
+   rewrites the artifacts (watch_artifacts, every three seconds) and never tells
+   the browser. Before this cache existed every click refetched, so a `dbt build`
+   in the terminal showed up on the next click; an entry that outlived that poll
+   would take that back. Three seconds is the server's own interval, so the cache
+   is never staler than the thing it is caching. */
 const NODE_CACHE_MAX = 200;
+const NODE_CACHE_TTL = 3000;
 
 function nodeKey(q) {
   return q.id ? 'id:' + q.id : 'file:' + q.file;
@@ -72,11 +80,11 @@ function nodeKey(q) {
 function nodeDetail(q) {
   const key = nodeKey(q);
   const hit = S.nodeCache.get(key);
-  if (hit && hit.gen === S.nodeGen) return hit.p;
+  if (hit && hit.gen === S.nodeGen && Date.now() - hit.at < NODE_CACHE_TTL) return hit.p;
   const path = q.id ? '/api/node?id=' + encodeURIComponent(q.id) : '/api/node?file=' + encodeURIComponent(q.file);
   // A failed request must not be remembered as the answer.
   const p = api.get(path).catch((e) => { S.nodeCache.delete(key); throw e; });
-  S.nodeCache.set(key, { gen: S.nodeGen, p });
+  S.nodeCache.set(key, { gen: S.nodeGen, at: Date.now(), p });
   if (S.nodeCache.size > NODE_CACHE_MAX) S.nodeCache.delete(S.nodeCache.keys().next().value);
   return p;
 }
@@ -1670,7 +1678,7 @@ async function openColumn(n, column) {
       applyMeta((await api.get('/api/meta')).meta);
       if (S.node && S.node.id === n.id) {
         S.colHighlight = column;
-        renderCatalog(await api.get('/api/node?id=' + encodeURIComponent(n.id)));
+        renderCatalog(await nodeDetail({ id: n.id }));
       }
     }
     const outside = res.unmatched_total
@@ -3145,7 +3153,6 @@ function wireKeys() {
   $('#reload-btn').addEventListener('click', async () => {
     try {
       const meta = await api.send('/api/reload', 'POST', {});
-      dropNodeCache();
       applyMeta(meta);
       toast(`manifest reloaded in ${meta.load_ms} ms`, 'ok');
       rerender();
@@ -3155,6 +3162,10 @@ function wireKeys() {
 
 // ------------------------------------------------------------------ boot --
 function applyMeta(meta) {
+  // Every caller of this has just learned the graph changed, which is exactly
+  // when a cached /api/node payload stops being true. Here rather than at each
+  // call site: forgetting one is how a stale count survives a column fetch.
+  dropNodeCache();
   S.meta = meta;
   $('#project').textContent = meta.project || '(no manifest)';
   const c = meta.counts || {};

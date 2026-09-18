@@ -280,9 +280,10 @@ pub fn scan(text: &str) -> ProjectVars {
         }
 
         if rest.trim().is_empty() {
-            // Either a package scope or a null. Count what is nested under it.
+            // A block sequence, a package scope, or a null. Collect the nested
+            // lines first: which of the three it is depends on their shape.
             let mut k = j + 1;
-            let mut count = 0;
+            let mut nested: Vec<&str> = Vec::new();
             while k < lines.len() {
                 if skippable(lines[k]) {
                     k += 1;
@@ -290,12 +291,52 @@ pub fn scan(text: &str) -> ProjectVars {
                 }
                 match indent_of(lines[k]) {
                     Some(i) if i > block => {
-                        count += 1;
+                        nested.push(lines[k].trim());
                         k += 1;
                     }
                     _ => break,
                 }
             }
+            let count = nested.len();
+
+            // A single `-` makes it a sequence, not a package scope: only
+            // `key: value` lines all the way down are a scope. A list is an
+            // ordinary var value and the commonest way to write one, so it is
+            // read; anything richer than plain items is reported rather than
+            // guessed at.
+            if nested.iter().any(|l| l.starts_with('-')) {
+                let mut items = Vec::new();
+                let mut bad = !nested.iter().all(|l| l.starts_with('-'));
+                for line in nested.iter().take_while(|_| !bad) {
+                    let item = line[1..].trim();
+                    if item.is_empty() {
+                        bad = true;
+                        break;
+                    }
+                    match parse_value(item) {
+                        Value::Scalar(v) => items.push(v),
+                        _ => {
+                            bad = true;
+                            break;
+                        }
+                    }
+                }
+                if bad {
+                    out.unparsed.push(Unparsed { line: j + 1, message: "a sequence of anything but plain items is not read" });
+                } else {
+                    push_var(&mut out, ProjectVar {
+                        name,
+                        line: j + 1,
+                        raw: items.join(", "),
+                        list: Some(items),
+                        jinja: false,
+                        null: false,
+                    });
+                }
+                j = k;
+                continue;
+            }
+
             if count == 0 {
                 push_var(&mut out, ProjectVar {
                     name,
@@ -442,6 +483,34 @@ mod tests {
         let v = &p.vars[0];
         assert_eq!(v.list.as_deref(), Some(["GBP".to_string(), "USD".to_string(), "EUR".to_string()].as_slice()));
         assert_eq!(v.raw, "GBP, USD, EUR");
+    }
+
+    #[test]
+    fn a_block_sequence_is_a_list_not_a_package() {
+        // The commonest way to write a list var, and it must not be mistaken
+        // for a package scope, which would make the var vanish silently.
+        let p = scan("vars:\n  regions:\n    - EU\n    - 'US'\n  alpha: 1\n");
+        assert_eq!(names(&p), ["regions", "alpha"]);
+        assert_eq!(
+            p.vars[0].list.as_deref(),
+            Some(["EU".to_string(), "US".to_string()].as_slice())
+        );
+        assert_eq!(raw(&p, "regions"), "EU, US");
+        assert!(p.packages.is_empty());
+        assert!(p.unparsed.is_empty());
+    }
+
+    #[test]
+    fn a_block_sequence_with_an_inline_comment_keeps_the_value() {
+        let p = scan("vars:\n  regions:\n    - EU   # primary\n");
+        assert_eq!(p.vars[0].list.as_deref(), Some(["EU".to_string()].as_slice()));
+    }
+
+    #[test]
+    fn a_sequence_of_mappings_is_reported_not_guessed() {
+        let p = scan("vars:\n  rules:\n    - name: a\n      to: b\n");
+        assert!(p.vars.is_empty());
+        assert_eq!(p.unparsed.len(), 1);
     }
 
     #[test]
