@@ -28,6 +28,7 @@
     <div class="tabs">
       <button class="tab active" data-side="files">Files</button>
       <button class="tab" data-side="models">Models</button>
+      <button class="tab" data-side="search">Search</button>
       <button class="tab" data-side="git">Git<span id="git-badge" class="tabbadge hidden"></span></button>
     </div>
     <div id="side-files" class="side-pane">
@@ -81,6 +82,11 @@
       </div>
     </div>
 
+    <div id="side-search" class="side-pane hidden">
+      <input id="grep-input" class="filter" placeholder="Search in all files…" spellcheck="false" autocomplete="off">
+      <div id="grep-status" class="muted grep-status"></div>
+      <div id="grep-results" class="list"></div>
+    </div>
     <div id="side-models" class="side-pane hidden">
       <input id="model-filter" class="filter" placeholder="Filter models and sources…" spellcheck="false">
       <div id="model-list" class="list"></div>

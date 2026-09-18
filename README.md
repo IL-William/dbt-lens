@@ -208,6 +208,7 @@ sub-graphs around whichever model you are looking at.
 | `Cmd/Ctrl + \`` | jump to the terminal |
 | click a column in Catalog > Columns | draw its lineage, fetched from Snowflake when the switch is on |
 | hover a lineage node, a `ref()` or a `var()` | a card with what it is |
+| the Search tab in the sidebar | find a word inside every file, not just in their names |
 | click a lineage node | select it, fill the Node panel |
 | double-click a lineage node | re-centre the lineage on it and open its file |
 | `+N` badge on a node | pull in one more level of parents or children |
@@ -293,6 +294,23 @@ and virtualenvs are skipped, since `target` alone holds more files than the rest
 of the project put together. `dbt_packages` is indexed but ranked below your own
 files, so reading an automate_dv macro is one search away without ever
 outranking your own code.
+
+### Search in file contents
+
+The **Search** tab in the sidebar looks inside every indexed file, which
+`Cmd/Ctrl + K` cannot: that one matches names, so a column used in forty models
+is invisible to it. Type three letters or more and the matching lines appear
+grouped by file, with the match highlighted; clicking one opens the file in the
+preview tab with the cursor on that line.
+
+It is case-insensitive and plain text, not a pattern. A full pass over a 12 000
+file project takes well under a second, so results follow typing rather than
+waiting for Enter. Files it passed over, binaries and anything over 2 MB, are
+counted in the status line rather than quietly dropped.
+
+`.env` files are never opened by it (0020). Searching for a variable's name
+finds where it is used, never where it is set; the Manage environments panel
+answers that other question, by name.
 
 ### Explorer
 
@@ -576,6 +594,7 @@ $JSC web/tests/location.js    # written, resolved and built locations
 $JSC web/tests/jinja.js       # Jinja colouring, and SQL never shown the Jinja
 $JSC web/tests/hovercard.js   # where a hover card lands beside its anchor
 $JSC web/tests/vars.js        # var() / env_var() scanning, and where a value came from
+$JSC web/tests/grep.js        # what a search result says, and where the match falls
 ```
 
 The Snowflake script has tests of its own, against a fake connector and a fake

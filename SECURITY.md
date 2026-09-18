@@ -24,7 +24,9 @@ the editor reads and writes their files.
   editor is for. The environments panel, by contrast, never returns a `.env`
   value, only names and counts. The hover card on a variable does show a
   resolved value, but never one whose name is a `DBT_ENV_SECRET_*` or reads as a
-  credential; both guards are server-side (0019).
+  credential; both guards are server-side (0019). Searching across file contents
+  skips `.env` files entirely, since a search is a wide read nobody aimed at a
+  particular file (0020).
 - **No outbound network calls of its own**, apart from the git commands you
   click. Snowflake column lineage is a separate script, `tools/sf_lineage.py`,
   which dbt-lens starts only while you have that switch on, and which opens a

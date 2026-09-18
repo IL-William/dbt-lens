@@ -9,7 +9,7 @@ Editor with clickable `ref()` and `source()` and Jinja coloured by role,
 lineage graph in model and column modes, column lineage fetched from Snowflake
 when a column is clicked and the switch in Catalog > Columns is on (0016),
 terminal, file explorer with git and
-unsaved colouring, search across nodes and every file, Catalog with columns and
+unsaved colouring, search across nodes, file names and file contents, Catalog with columns and
 locations, compiled SQL with freshness, git panel (status, branch switch, stage,
 commit, push, pull, conflicts, side-by-side diff), Python environment in the
 status bar, and environment-aware location resolution with a `.env` selector.
@@ -20,6 +20,11 @@ resolved under the selected environment. Project vars come from a hand-written
 scanner over `dbt_project.yml` (0018), because the manifest does not carry them.
 Showing a resolved value needed the .env boundary widened, which 0019 does,
 under two guards.
+
+Search across file contents, added 2026-09-18: the Search tab reads the indexed
+files rather than their names, so a column used in forty models is findable. It
+never opens a `.env` (0020). A full pass over a 12 000 file project is under a
+second in release, after an ASCII fast path and a per-file pre-check.
 
 Every route sits behind the Host and Origin guard added on 2026-09-17 after a
 security audit found the terminal reachable from any web page (0015). The same

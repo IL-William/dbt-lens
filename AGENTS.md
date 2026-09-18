@@ -87,10 +87,11 @@ frontend fix does not exist in a release binary until it is rebuilt (see 0005).
 | start a process from the server, or touch `src/sidecar.rs` | [0016](docs/decisions/0016-column-lineage-on-demand.md) |
 | read a `.yml` file from the server, or reach for a YAML parser | [0018](docs/decisions/0018-project-vars-by-scanner.md) |
 | return any value derived from a `.env` file | [0019](docs/decisions/0019-a-resolved-value-may-be-shown.md) |
+| make the server read files it was not asked for by name | [0020](docs/decisions/0020-search-never-opens-an-env-file.md) |
 | set this up for someone, rather than change it | [README, Getting started](README.md#getting-started) |
 | pick up the next piece of work | [docs/state.md](docs/state.md) |
 
-All nineteen decisions, with what was rejected each time, are indexed in
+All twenty decisions, with what was rejected each time, are indexed in
 [docs/decisions/](docs/decisions/). The [README](README.md) is the user-facing
 documentation: what the tool does and how to use it. Rationale lives here, never
 in both.

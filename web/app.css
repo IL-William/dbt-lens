@@ -546,6 +546,25 @@ kbd {
 .cm-varlink { border-bottom: 1px dotted var(--seed); cursor: help; border-radius: 2px; }
 .cm-varlink:hover { color: var(--seed) !important; border-bottom-style: solid; background: #16281f; }
 
+/* ---------------------------------------------------------------- search -- */
+.grep-status { padding: 0 10px 6px; font-size: 11px; }
+.grep-file {
+  display: flex; align-items: baseline; gap: 6px; padding: 4px 10px 2px;
+  cursor: pointer; font-size: 12px; font-weight: 600;
+}
+.grep-file:hover { background: var(--bg-3); }
+.grep-file .nm { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grep-file .dir {
+  color: var(--fg-dim); font: 10.5px var(--mono); font-weight: 400; margin-left: auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl;
+}
+.grep-hit { display: flex; gap: 8px; padding: 1px 10px 1px 18px; cursor: pointer; font: 11px var(--mono); }
+.grep-hit:hover { background: var(--bg-3); }
+.grep-hit .ln { color: var(--fg-dim); min-width: 32px; text-align: right; flex: 0 0 auto; }
+.grep-hit .tx { color: #b9c4d2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grep-hit mark { background: var(--accent-dim); color: var(--fg); border-radius: 2px; }
+.grep-more { padding: 1px 10px 4px 18px; font: 10.5px var(--mono); color: var(--fg-dim); }
+
 /* --------------------------------------------------------------- catalog -- */
 .catalog { height: 100%; display: flex; flex-direction: column; min-height: 0; }
 .cat-head { flex: 0 0 auto; padding: 12px 16px 0; border-bottom: 1px solid var(--line); }
