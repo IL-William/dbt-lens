@@ -49,12 +49,16 @@ const Lineage = (() => {
   const clip = (s, max) => (s.length > max ? s.slice(0, max - 1) + '…' : s);
 
   /* Second line of a node box. Column mode ships a ready-made `sub`; model mode
-     builds one from the materialization, schema and test count. */
+     builds one from the materialization, schema and test count.
+     `tests` is a count in a lineage node and a list in an /api/node payload, and
+     the hover card feeds it the second: counting here rather than at each call
+     site keeps "[object Object]" out of the line. */
   function subtitle(n) {
     if (n.sub) return n.sub;
     const bits = [n.disabled ? 'disabled' : n.kind === 'source' ? 'source' : (n.materialized || n.kind)];
     if (n.schema) bits.push(n.schema);
-    if (n.tests) bits.push(`${n.tests} test${n.tests > 1 ? 's' : ''}`);
+    const tests = Array.isArray(n.tests) ? n.tests.length : n.tests;
+    if (tests) bits.push(`${tests} test${tests > 1 ? 's' : ''}`);
     return bits.join('  ·  ');
   }
 

@@ -38,14 +38,19 @@ print('\n--- ranges ---');
 var text = "select {{ var('prefix') }} from {{ env_var('DBT_WH') }}";
 var hits = scan(text);
 check('two hits on one line', hits.length, 2);
-check('the range covers the name only', text.slice(hits[0].ranges[0][0], hits[0].ranges[0][1]), 'prefix');
-check('and for the second call', text.slice(hits[1].ranges[0][0], hits[1].ranges[0][1]), 'DBT_WH');
+// The whole call is the hover target: a variable has nothing to click, so a
+// range covering only the quoted name is something you have to aim at.
+check('the range covers the whole call', text.slice(hits[0].ranges[0][0], hits[0].ranges[0][1]), "var('prefix')");
+check('and for the second call', text.slice(hits[1].ranges[0][0], hits[1].ranges[0][1]), "env_var('DBT_WH')");
 check('the ranges do not overlap', hits[0].ranges[0][1] <= hits[1].ranges[0][0], true);
+check('a call with a default is covered to its closing bracket',
+  (function () { var t = "{{ var('days', 7) }}"; var h = scan(t)[0]; return t.slice(h.ranges[0][0], h.ranges[0][1]); })(),
+  "var('days', 7)");
 
 print('\n--- offsets survive masked comments and newlines ---');
 var multi = "{# a note\n   over two lines #}\nwith x as (\n  select {{ var('prefix') }}\n)";
 var one = scan(multi)[0];
-check('the name is still found at its real offset', multi.slice(one.ranges[0][0], one.ranges[0][1]), 'prefix');
+check('the call is still found at its real offset', multi.slice(one.ranges[0][0], one.ranges[0][1]), "var('prefix')");
 
 print('\n--- varNote ---');
 check('read from the chosen file',

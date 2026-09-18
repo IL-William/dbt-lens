@@ -280,13 +280,15 @@ function scanVars(text) {
   while ((m = VAR_RE.exec(text)) !== null) {
     // \b matches after a dot too, so dbt_utils.var('x') would otherwise count.
     if (text[m.index - 1] === '.') continue;
-    const quoted = m[2] + m[3] + m[2];
-    const from = m.index + m[0].indexOf(quoted) + 1;
+    // The whole call, not just the name inside the quotes the way scanCalls
+    // marks a ref(). A ref's name is the thing you click, so a tight target is
+    // right there; a variable has nothing to click, and `var('x')` reads as one
+    // word, so anything less than the whole of it is a target you have to aim at.
     found.push({
       kind: m[1],
       name: m[3],
       fallback: m[4] === undefined ? '' : m[4].trim(),
-      ranges: [[from, from + m[3].length]],
+      ranges: [[m.index, m.index + m[0].length]],
     });
   }
   return found;
