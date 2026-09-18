@@ -43,10 +43,11 @@ installing means building from source, as
 deliberate later step: an unsigned executable download brings its own friction
 on a managed Windows machine.
 
-The VM can also build its own binary. On 2026-09-17, `cargo install --path .`
-succeeded there without administrator rights, with Rust's GNU toolchain and a
-mingw-w64 installed through winget, once the assembler that `raw-dylib` linking
-needs was on `PATH`. The README gives both that route and the cross-compile.
+A locked-down Windows machine can also build its own binary: `cargo install
+--path .` works there without administrator rights, with Rust's GNU toolchain
+and a mingw-w64 installed through winget, once the assembler that `raw-dylib`
+linking needs is on `PATH`. The README gives both that route and the
+cross-compile.
 
 ## Waiting on a human
 
@@ -55,10 +56,10 @@ needs was on `PATH`. The README gives both that route and the cross-compile.
   Edition, `VIEW LINEAGE`, and whether the objects of the chosen environment
   carry lineage at all. Everything up to the connection is tested against a
   fake connector.
-- **Two checks on the Windows VM**: `.env` files with CRLF endings read
-  correctly, and the time a node click takes on that machine. The plan was to
-  cache the per-node environment resolution only if it exceeded 10 ms, and it
-  measures well under that on a Mac.
+- **Two checks on Windows**: `.env` files with CRLF endings read correctly, and
+  the time a node click takes there. The plan was to cache the per-node
+  environment resolution only if it exceeded 10 ms, and it measures well under
+  that on a Mac.
 - **A release binary predating 2026-09-17 has no guard.** Anyone running one
   needs `cargo build --release` again, the old one being vulnerable to the
   three attacks 0015 describes.
