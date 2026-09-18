@@ -3044,14 +3044,107 @@ function choosePalette(i) {
 }
 
 // ------------------------------------------------------------------ tabs --
+/* Search across file contents, which the path index cannot answer. The server
+   finds the lines; the match inside one is found here, because the browser knows
+   the query and a byte offset from Rust would not survive into a UTF-16 string. */
+function splitMatch(text, query) {
+  const at = text.toLowerCase().indexOf(query.toLowerCase());
+  if (!query || at < 0) return [text, '', ''];
+  return [text.slice(0, at), text.slice(at, at + query.length), text.slice(at + query.length)];
+}
+
+/* What the status line says about a result. Pure, so the wording is checkable. */
+function grepSummary(result, query) {
+  if (!query) return '';
+  if (query.length < 3) return 'three letters or more';
+  if (!result) return 'searching…';
+  const files = result.files.length;
+  if (!files) return `no match for "${query}"`;
+  const hits = result.total;
+  const bits = [`${hits} match${hits > 1 ? 'es' : ''} in ${files} file${files > 1 ? 's' : ''}`];
+  if (result.capped) bits.push('showing the first found');
+  if (result.skipped) bits.push(`${result.skipped} file${result.skipped > 1 ? 's' : ''} skipped`);
+  return bits.join(' · ');
+}
+
+let grepTimer = null;
+let grepRun = 0;
+
+function paintGrep(result, query) {
+  $('#grep-status').textContent = grepSummary(result, query);
+  const host = $('#grep-results');
+  host.textContent = '';
+  if (!result) return;
+  for (const f of result.files) {
+    const head = document.createElement('div');
+    head.className = 'grep-file';
+    head.append(Object.assign(document.createElement('span'), { className: 'nm', textContent: base(f.path) }));
+    head.append(Object.assign(document.createElement('span'), { className: 'dir', textContent: dirOf(f.path) }));
+    head.title = f.path;
+    head.addEventListener('click', () => openAt(f.path, f.hits[0].line));
+    host.appendChild(head);
+    for (const h of f.hits) {
+      const row = document.createElement('div');
+      row.className = 'grep-hit';
+      row.append(Object.assign(document.createElement('span'), { className: 'ln', textContent: h.line }));
+      const [before, hit, after] = splitMatch(h.text, query);
+      const body = document.createElement('span');
+      body.className = 'tx';
+      body.append(document.createTextNode(before));
+      if (hit) body.append(Object.assign(document.createElement('mark'), { textContent: hit }));
+      body.append(document.createTextNode(after));
+      row.appendChild(body);
+      row.addEventListener('click', () => openAt(f.path, h.line));
+      host.appendChild(row);
+    }
+    if (f.more) {
+      host.append(Object.assign(document.createElement('div'), {
+        className: 'grep-more', textContent: `+${f.more} more in this file`,
+      }));
+    }
+  }
+}
+
+function runGrep() {
+  const query = $('#grep-input').value.trim();
+  clearTimeout(grepTimer);
+  if (query.length < 3) {
+    paintGrep(null, query);
+    return;
+  }
+  paintGrep(null, query);
+  const run = ++grepRun;
+  // A full scan of a large project is well under a second, so a short pause is
+  // enough to keep a burst of typing down to one request.
+  grepTimer = setTimeout(() => {
+    api.get('/api/grep?q=' + encodeURIComponent(query))
+      .then((result) => { if (run === grepRun) paintGrep(result, query); })
+      .catch((e) => { if (run === grepRun) $('#grep-status').textContent = 'search failed: ' + e.message; });
+  }, 250);
+}
+
+/* Opens a file and puts the cursor on one of its lines, which is what a search
+   result is for. Preview, like a single click in the explorer: browsing results
+   should not leave a dozen pinned tabs behind. */
+async function openAt(path, line) {
+  await openFile(path, { focusLineage: false, preview: true });
+  if (!S.cm || S.active !== path) return;
+  const pos = { line: Math.max(0, line - 1), ch: 0 };
+  S.cm.setCursor(pos);
+  S.cm.scrollIntoView({ from: pos, to: pos }, 120);
+  S.cm.focus();
+}
+
 function wireTabs() {
   $$('[data-side]').forEach((b) => b.addEventListener('click', () => {
     $$('[data-side]').forEach((x) => x.classList.toggle('active', x === b));
     $('#side-files').classList.toggle('hidden', b.dataset.side !== 'files');
     $('#side-models').classList.toggle('hidden', b.dataset.side !== 'models');
     $('#side-git').classList.toggle('hidden', b.dataset.side !== 'git');
+    $('#side-search').classList.toggle('hidden', b.dataset.side !== 'search');
     if (b.dataset.side === 'models' && !$('#model-list').children.length) refreshModels();
     if (b.dataset.side === 'git') refreshGit();
+    if (b.dataset.side === 'search') $('#grep-input').focus();
   }));
 
   $$('[data-dock]').forEach((b) => b.addEventListener('click', () => showDock(b.dataset.dock)));
@@ -3227,6 +3320,7 @@ async function boot() {
     },
   });
   wireTabs(); wireKeys(); wireSplitters(); relinkTools();
+  $('#grep-input').addEventListener('input', runGrep);
   renderTabs();
   paintMode();
   $('#editor-host').style.display = 'none';
