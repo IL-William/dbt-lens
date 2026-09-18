@@ -54,6 +54,9 @@ frontend fix does not exist in a release binary until it is rebuilt (see 0005).
   taken from a real project (0014).
 - **The browser is not trusted.** Every route sits behind the Host and Origin
   guard in `src/api.rs`, and no CORS header is ever added (0015).
+- **Bump the version in `Cargo.toml` and tag the commit** for anything anyone
+  installs. Between tags the build stamp tells builds apart; the version is
+  what says a release happened.
 - **Comments say why, not what.** The code already says what it does.
 - **No em dash** in code, comments or documentation.
 
@@ -97,6 +100,7 @@ in both.
 `src/manifest.rs` reads the manifest, `src/graph.rs` holds the compact graph,
 `src/api.rs` serves HTTP and WebSocket, and the remaining modules take one
 concern each: `envs`, `project`, `settings`, `git`, `collin`, `sidecar`,
-`compiled`, `venv`, `files`, `pty`. `web/` is the frontend, `web/vendor/` the
-vendored libraries, `tools/sf_lineage.py` the only piece that talks to a
-warehouse. The README has the annotated version.
+`compiled`, `venv`, `files`, `pty`. `build.rs` stamps the binary with
+`git describe`, so two builds of one release can be told apart. `web/` is the
+frontend, `web/vendor/` the vendored libraries, `tools/sf_lineage.py` the only
+piece that talks to a warehouse. The README has the annotated version.

@@ -224,6 +224,11 @@ fn err(e: impl std::fmt::Display) -> Response {
 struct MetaBody {
     root: String,
     shell: String,
+    /// The package version, and which build it is. A release binary embeds
+    /// `web/` (0005), so the page saying which build drew it is the quickest
+    /// answer to "my frontend fix did nothing".
+    version: &'static str,
+    build: &'static str,
     venv: VenvInfo,
     meta: crate::graph::Meta,
 }
@@ -233,6 +238,8 @@ async fn meta(State(st): State<Arc<AppState>>) -> Response {
     Json(MetaBody {
         root: st.root.display().to_string(),
         shell: format!("{} {}", st.shell.program, st.shell.args.join(" ")).trim().to_string(),
+        version: env!("CARGO_PKG_VERSION"),
+        build: env!("DBT_LENS_BUILD"),
         venv: st.venv.clone(),
         meta: graph.meta.clone(),
     })

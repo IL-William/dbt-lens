@@ -156,7 +156,7 @@ opens a browser:
   reading /home/you/analytics/target/manifest.json
   2104 nodes in 180 ms  (412 models, 96 sources, 1508 tests)
 
-  dbt-lens  0.1.0
+  dbt-lens  0.2.0  (v0.2.0, built 2026-09-18)
   project   /home/you/analytics
   shell     /bin/zsh -l
   venv      dbt-env (activated, python 3.12)
@@ -165,7 +165,10 @@ opens a browser:
 
 Those lines are worth reading once: they say which project, manifest, shell and
 Python environment were picked up, which is where nearly every setup mistake
-shows up first. `Ctrl+C` in that terminal stops the server. Every flag is listed
+shows up first. The version carries the build it came from, from
+`git describe`, so two installs of the same release are still told apart; the
+status bar shows the same thing at the bottom right of the page, and `dbt-lens
+--version` prints it without starting anything. `Ctrl+C` in that terminal stops the server. Every flag is listed
 under [Options](#options).
 
 Only the manifest fields the UI needs are read and the rest is ignored, so a
@@ -185,6 +188,7 @@ it is used against day to day.
 | the Snowflake lineage switch says `failed` | the script could not start, and its tooltip says why | usually no `snowflake-connector-python` in the Python it found, or no `profiles.yml` it can read |
 | a clicked column comes back with no lineage | the object was not built by a query Snowflake could analyse, or the role cannot see it | check with `sf_lineage.py probe`, and check the environment pill names the objects you mean |
 | no browser opened | `--no-open`, or no default browser | open the printed URL by hand |
+| a fix seems to have no effect after reinstalling | the running binary is an older build | compare `dbt-lens --version` with `git describe --tags --always --dirty` in the clone; on Windows, stop dbt-lens first, since the `.exe` cannot be replaced while it runs |
 
 ## Why
 

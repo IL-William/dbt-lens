@@ -3222,6 +3222,11 @@ async function boot() {
   applyMeta(info.meta);
   await loadSidecar();
   $('#status-shell').textContent = info.shell;
+  // Which build drew this page. A release binary embeds web/ (0005), so this is
+  // what tells a stale binary from a frontend change that really did nothing.
+  const build = $('#status-build');
+  build.textContent = 'v' + (info.version || '?');
+  build.title = `dbt-lens ${info.version || '?'}\n${info.build || 'no build stamp'}`;
   const v = info.venv || {};
   const venvEl = $('#status-venv');
   if (v.name) {

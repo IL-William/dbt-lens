@@ -1,7 +1,7 @@
 # Where the work stands
 
 Rewritten as things change, unlike [decisions/](decisions/), which is appended
-to. Last updated 2026-09-17.
+to. Last updated 2026-09-18.
 
 ## Shipped
 
@@ -47,6 +47,12 @@ local index (`dbt compile --static-analysis strict --write-index
 --write-lineage`), which needs no warehouse privileges and covers uncommitted
 SQL. It fills the same cache file (0008).
 
+0.2.0 adds the hover cards. Since 0.2.0 the binary also carries a build stamp
+(`git describe`, or a build date without a `.git`), shown by `--version`, by the
+startup banner and in the status bar, because until then two installs of the
+same release were indistinguishable and reinstalling on the VM looked like it
+had done nothing.
+
 0.1.0 is tagged and released on GitHub as source only. No binary is attached, so
 installing means building from source, as
 [the README](../README.md#getting-started) describes. Attaching binaries is a
@@ -80,7 +86,8 @@ cross-compile.
   its `source` field. If the column graph looks suspiciously complete, check
   what produced the cache before trusting a screenshot of it.
 - **Release binaries embed the frontend** (0005). A frontend fix that appears to
-  do nothing usually means the release binary was not rebuilt.
+  do nothing usually means the release binary was not rebuilt. The build stamp
+  in the status bar settles it: compare it with `git describe` in the clone.
 - **Switching Snowflake lineage on proves nothing about Snowflake.** It checks
   Python, the profile and the connector, all local. The first click is what
   reaches the warehouse, and what may open a sign-in tab.
