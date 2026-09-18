@@ -20,8 +20,9 @@ operating systems, an async HTTP server) and write the small stuff by hand:
   conflict markers, `ref()` calls. Hand-written scanners in `src/envs.rs` and
   `web/app.js` are more readable at this size, and they report *where* they
   gave up instead of silently not matching.
-- **No YAML parser.** The manifest already holds the merged YAML, so nothing
-  needs to read `.yml` files.
+- **No YAML parser.** The manifest holds the merged YAML for everything the
+  graph needs. The one thing it does not hold is the `vars:` block, read by a
+  hand-written scanner in `src/project.rs` (0016).
 - **No HTTP client or TLS.** The server never calls anything outbound (0008).
 
 ## Rejected

@@ -37,6 +37,9 @@ const Lineage = (() => {
 
   let svg, root, handlers = {}, data = null, place = [], bbox = null;
   let view = { k: 1, x: 0, y: 0 }, selected = null;
+  // Module scope, not init's: render() reads it to keep a hover card from
+  // opening under a pointer that is in the middle of a pan.
+  let drag = null;
 
   const el = (name, attrs = {}) => {
     const n = document.createElementNS(NS, name);
@@ -72,7 +75,6 @@ const Lineage = (() => {
       apply();
     }, { passive: false });
 
-    let drag = null;
     svg.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false };
@@ -89,7 +91,14 @@ const Lineage = (() => {
     svg.addEventListener('dblclick', (e) => { if (e.target === svg) fit(); });
   }
 
-  const apply = () => root.setAttribute('transform', `translate(${view.x},${view.y}) scale(${view.k})`);
+  /* The one place a pan, a wheel zoom and fit() all pass through, so closing the
+     hover card here covers every way the boxes can move out from under it.
+     onHoverClose, not onHoverOut: a pan fires this on every mousemove, and the
+     grace period onHoverOut grants would just keep being restarted. */
+  const apply = () => {
+    root.setAttribute('transform', `translate(${view.x},${view.y}) scale(${view.k})`);
+    handlers.onHoverClose && handlers.onHoverClose();
+  };
 
   /* Column layout with a few barycenter sweeps. */
   function layout(d) {
@@ -182,12 +191,19 @@ const Lineage = (() => {
       if (n.hidden_up) g.appendChild(badge(-16, H / 2, `+${n.hidden_up}`, 'up'));
       if (n.hidden_down) g.appendChild(badge(W + 16, H / 2, `+${n.hidden_down}`, 'down'));
 
-      const title = el('title');
-      title.textContent = `${n.id}\n${n.file}`;
-      g.appendChild(title);
+      // An aria-label rather than a <title>: the native tooltip a <title> draws
+      // would arrive a second after the hover card and sit on top of it. The
+      // group still needs an accessible name, and role="img" is what gets one
+      // exposed on a bare <g>.
+      g.setAttribute('role', 'img');
+      g.setAttribute('aria-label', `${n.id} ${n.file}`);
 
       g.addEventListener('click', (e) => { e.stopPropagation(); select(n.id); handlers.onSelect && handlers.onSelect(n); });
       g.addEventListener('dblclick', (e) => { e.stopPropagation(); handlers.onOpen && handlers.onOpen(n); });
+      // enter/leave, not over/out: the group has four children, and crossing
+      // between them would fire over/out as if the box had been left.
+      g.addEventListener('mouseenter', () => { if (!drag) handlers.onHover && handlers.onHover(n, g); });
+      g.addEventListener('mouseleave', () => handlers.onHoverOut && handlers.onHoverOut());
       nodeLayer.appendChild(g);
     });
 
@@ -225,7 +241,12 @@ const Lineage = (() => {
     apply();
   }
 
-  const clear = () => { root && (root.textContent = ''); data = null; bbox = null; };
+  // clear() does not go through apply(), so it closes the card itself.
+  const clear = () => {
+    root && (root.textContent = '');
+    data = null; bbox = null;
+    handlers.onHoverClose && handlers.onHoverClose();
+  };
 
   return { init, render, fit, select, clear, subtitle, nodeColor, matLabel };
 })();

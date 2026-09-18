@@ -9,6 +9,7 @@ mod files;
 mod git;
 mod graph;
 mod manifest;
+mod project;
 mod pty;
 mod settings;
 mod sidecar;

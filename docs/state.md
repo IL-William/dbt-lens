@@ -14,6 +14,13 @@ locations, compiled SQL with freshness, git panel (status, branch switch, stage,
 commit, push, pull, conflicts, side-by-side diff), Python environment in the
 status bar, and environment-aware location resolution with a `.env` selector.
 
+Hover cards, added 2026-09-18: a lineage box or a `ref()` shows the model's
+description, columns and counts; a `var()` or `env_var()` shows its value,
+resolved under the selected environment. Project vars come from a hand-written
+scanner over `dbt_project.yml` (0018), because the manifest does not carry them.
+Showing a resolved value needed the .env boundary widened, which 0019 does,
+under two guards.
+
 Every route sits behind the Host and Origin guard added on 2026-09-17 after a
 security audit found the terminal reachable from any web page (0015). The same
 pass confined `/api/git/diff` to the project and added `SECURITY.md`.
@@ -31,6 +38,9 @@ pass confined `/api/git/diff` to the project and added `SECURITY.md`.
 3. **Selector resolution, then orchestration coverage.** Resolve the project's
    named selectors locally, validate against `dbt ls`, and only then scan the
    orchestrator's jobs to show which models no schedule covers.
+4. **A var's definition line, clickable.** The card names
+   `dbt_project.yml:<line>`; opening the file there needs a YAML key scanner in
+   the browser, which nothing else wants yet.
 
 Sketched but not started: a second column-lineage source using dbt Fusion's
 local index (`dbt compile --static-analysis strict --write-index
@@ -76,6 +86,9 @@ cross-compile.
   reaches the warehouse, and what may open a sign-in tab.
 - **The test harnesses slice `web/app.js` by function name** (0013). Renaming a
   sliced function breaks its harness; `./scripts/check.sh` catches it.
+- **`openFile` sits inside the slice `web/tests/tabs.js` evaluates.** Anything
+  new it calls has to be stubbed there, or the harness dies with no output at
+  all rather than a failed assertion.
 - **Reaching the server by any name other than `127.0.0.1` or `localhost`
   gets a 403** (0015). A tunnel or a proxy in front of it is not a supported
   setup, and the symptom is every request refused, not a blank page.

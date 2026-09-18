@@ -10,6 +10,8 @@ var CodeMirror = { Doc: function (t, m) { return { t: t }; } };
 var activated = [];
 function activate(p) { S.active = p; activated.push(p); }
 function markRefs() {}
+function closeHoverCard() {}
+function markVars() {}
 function modeFor() { return null; }
 function toast(m) { print('  toast: ' + m); }
 eval(fn);
