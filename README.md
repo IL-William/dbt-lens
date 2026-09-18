@@ -182,6 +182,8 @@ it is used against day to day.
 | the Git tab reports no repository | `git` is not on `PATH`, or the folder is not a clone | check `git -C <project> status` |
 | column types are missing in the Catalog | no `catalog.json` | dbt Fusion: `dbt compile --write-catalog`; dbt-core: `dbt docs generate` |
 | the URL says a port other than 4321 | 4321 was busy, so it walked forward to a free one | use the URL it printed, or pass `--port` |
+| the Snowflake lineage switch says `failed` | the script could not start, and its tooltip says why | usually no `snowflake-connector-python` in the Python it found, or no `profiles.yml` it can read |
+| a clicked column comes back with no lineage | the object was not built by a query Snowflake could analyse, or the role cannot see it | check with `sf_lineage.py probe`, and check the environment pill names the objects you mean |
 | no browser opened | `--no-open`, or no default browser | open the printed URL by hand |
 
 ## Why
@@ -200,6 +202,7 @@ sub-graphs around whichever model you are looking at.
 | `Cmd/Ctrl + Alt + S` | save every modified file |
 | `Alt + W`, or middle-click a tab | close a tab |
 | `Cmd/Ctrl + \`` | jump to the terminal |
+| click a column in Catalog > Columns | draw its lineage, fetched from Snowflake when the switch is on |
 | click a lineage node | select it, fill the Node panel |
 | double-click a lineage node | re-centre the lineage on it and open its file |
 | `+N` badge on a node | pull in one more level of parents or children |
@@ -283,34 +286,63 @@ File types get their own icon and colour; `.sql` files use a database glyph.
 Column-level edges come from Snowflake's `SNOWFLAKE.CORE.GET_LINEAGE`, read by
 `tools/sf_lineage.py`. dbt-lens itself never connects to Snowflake: it has no
 HTTP client, no TLS and no credential handling, and keeping it that way is what
-lets it ship as one dependency-free binary. The sidecar owns the connection and
-reads the dbt profile, so SSO, key-pair and password targets all work unchanged.
+lets it ship as one dependency-free binary. The script owns the connection and
+reads your dbt profile, so SSO, key-pair and password targets all work
+unchanged.
 
-Check what the role is allowed to read first, since `GET_LINEAGE` needs
-Enterprise Edition and the `VIEW LINEAGE` privilege:
+**Switch it on in Catalog > Columns, then click a column.** The switch is
+remembered per project. Switching on starts the script and checks everything
+that needs no network: a Python with the connector, your profile, its target
+and role, all named in the switch's tooltip. Nothing connects until you click a
+column, and the first click of a session may open a sign-in tab.
+
+In the top bar, next to the model counts, `profiles.yml` names the file the
+script read, and opens it in the editor. It is the one file outside the project dbt-lens opens, and only
+because the script says which one it is (0017). Saving it restarts the script,
+since the profile is read once, when it starts. When Snowflake refuses the
+connection, the message points at that file rather than leaving you with an
+error code.
+
+A click asks for that column's upstream and downstream lineage, as deep as the
+`up` and `down` boxes say and at most five levels, which is `GET_LINEAGE`'s
+limit. What comes back is added to `target/column_lineage.json` and drawn with
+columns as nodes, so it is still there after a restart and stays readable with
+the switch off. Changing `up` or `down` redraws what has been fetched; clicking
+a column asks Snowflake again.
+
+**Which objects are asked about follows the environment pill** in the status
+bar. On `manifest` that is the relation your last dbt run built, usually your
+own schema. Choose a `.env` file and it is the relation that environment
+resolves to, exactly as the Location table shows it. The cache itself names dbt
+nodes rather than warehouse objects, so one file holds for every environment.
+
+The Python that runs is a virtual environment of the project that has
+`snowflake-connector-python` (dbt-snowflake brings it), else the one the status
+bar names, else `python` on the `PATH`.
+
+`GET_LINEAGE` needs Enterprise Edition and the `VIEW LINEAGE` privilege. When a
+column comes back with nothing, check what the role is allowed to read:
 
 ```
-python3 tools/sf_lineage.py probe \
+python tools/sf_lineage.py probe \
   --relation my_database.my_schema.my_model --column my_column
 ```
 
-Then warm the cache for the models you care about. `GET_LINEAGE` takes one
-column per call, so a whole project is hundreds of thousands of calls: always
-scope the dump.
+The same script still fills the cache ahead of time, which is what to do before
+working offline. One call covers one column, so a whole project is hundreds of
+thousands of calls: always scope the dump.
 
 ```
-python3 tools/sf_lineage.py dump --select model_a,model_b \
+python tools/sf_lineage.py dump --select model_a,model_b \
   --out target/column_lineage.json
 ```
 
 dbt-lens picks `target/column_lineage.json` up on its own, the same way it picks
 up `catalog.json`, and reloads when the file changes. `--column-lineage <path>`
-overrides the location. With the cache present, the Catalog > Columns table
-gains a Lineage column, its rows become clickable, and the lineage canvas gains
-a Models / Columns switch that redraws the same graph with columns as nodes.
-
-Without the cache, nothing changes: the Columns table is exactly as it was and
-the Columns switch stays disabled.
+overrides the location. With edges present, the Catalog > Columns table gains a
+Lineage column and the canvas gains a Models / Columns switch. With no edges and
+the switch off, nothing changes: the Columns table is exactly as it was and the
+Columns switch stays disabled.
 
 ### Where a model lives
 
@@ -515,6 +547,13 @@ $JSC web/tests/location.js    # written, resolved and built locations
 $JSC web/tests/jinja.js       # Jinja colouring, and SQL never shown the Jinja
 ```
 
+The Snowflake script has tests of its own, against a fake connector and a fake
+PyYAML, so they need no warehouse and nothing installed:
+
+```
+python3 tools/test_sf_lineage.py
+```
+
 ## Layout
 
 ```
@@ -522,6 +561,7 @@ src/manifest.rs   manifest.json -> raw structs (only the fields the UI needs)
 src/graph.rs      compact node vector, adjacency, search, lineage BFS
 src/api.rs        HTTP + WebSocket handlers
 src/collin.rs     the column lineage cache, merged like catalog.json
+src/sidecar.rs    the Snowflake script: started by the switch, one request at a time
 src/compiled.rs   compiled SQL lookup and freshness
 src/envs.rs       .env parsing and location resolution per environment
 src/git.rs        working tree status and the git commands the UI can run

@@ -11,6 +11,7 @@ mod graph;
 mod manifest;
 mod pty;
 mod settings;
+mod sidecar;
 mod venv;
 
 use clap::Parser;
@@ -90,6 +91,9 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let target_dir = manifest_path.parent().map(Path::to_path_buf).unwrap_or_else(|| root.join("target"));
+    let seen = [graph.meta.manifest_mtime, graph.meta.catalog_mtime, graph.meta.cll_mtime];
+    let settings = settings::Store::new(&root);
+    let snowflake_on = settings.load().snowflake_lineage;
     let venv = venv::detect(&root);
     let shell = pty::ShellSpec::detect(args.shell);
     // Bound before the state exists: the guard in api.rs compares Host and
@@ -105,14 +109,22 @@ async fn main() -> anyhow::Result<()> {
         target_dir,
         venv: venv.clone(),
         file_index: tokio::sync::RwLock::new(Arc::new(files::scan(&root))),
-        settings: settings::Store::new(&root),
+        settings,
         graph: tokio::sync::RwLock::new(Arc::new(graph)),
         git: tokio::sync::Mutex::new(None),
         shell: shell.clone(),
+        sidecar: sidecar::Sidecar::new(snowflake_on, Default::default()),
+        cll_lock: tokio::sync::Mutex::new(()),
+        seen: std::sync::Mutex::new(seen),
     });
 
     tokio::spawn(api::watch_artifacts(state.clone()));
     tokio::spawn(api::watch_files(state.clone()));
+    if snowflake_on {
+        // Starting runs no query: the script connects on the first click (0016).
+        let st = state.clone();
+        tokio::spawn(async move { st.sidecar.start_for(&st.root, &st.venv).await });
+    }
 
     eprintln!("\n  dbt-lens  {}", env!("CARGO_PKG_VERSION"));
     eprintln!("  project   {}", root.display());
@@ -125,18 +137,22 @@ async fn main() -> anyhow::Result<()> {
             if venv.python.is_empty() { String::new() } else { format!(", python {}", venv.python) },
         );
     }
+    if snowflake_on {
+        eprintln!("  snowflake column lineage on, connecting on the first column click");
+    }
     eprintln!("  open      {url}\n");
 
     if !args.no_open {
         open_browser(&url);
     }
 
-    axum::serve(listener, api::router(state))
+    axum::serve(listener, api::router(state.clone()))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
             eprintln!("\n  bye");
         })
         .await?;
+    state.sidecar.stop().await;
     Ok(())
 }
 

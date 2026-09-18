@@ -21,6 +21,8 @@ it is built this way, for whoever changes it next.
 | [0013](0013-tests-without-a-toolchain.md) | Tests that need nothing installed | renaming a function in `web/app.js` |
 | [0014](0014-public-repository-hygiene.md) | Treat this repository as public | writing a fixture, an example or a commit message |
 | [0015](0015-the-browser-is-not-trusted.md) | The browser is not trusted: Host and Origin are checked | adding a route, changing the port logic, or adding a CORS header |
+| [0016](0016-column-lineage-on-demand.md) | Column lineage on demand, behind a switch | starting a process from the server, or changing what clicking a column does |
+| [0017](0017-the-profile-is-reachable.md) | The dbt profile is reachable, and it alone | opening, reading or writing anything outside the project |
 
 ## Keeping these honest
 

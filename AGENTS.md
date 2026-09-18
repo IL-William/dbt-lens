@@ -11,7 +11,7 @@ That is why there is no build step, no framework, and a short dependency list.
 ## Verify
 
 ```
-./scripts/check.sh          # Rust tests, both audits, browser tests, syntax
+./scripts/check.sh          # Rust tests, both audits, the Snowflake script, browser tests, syntax
 ```
 
 Run it before saying a change works. It is the only answer to "how do I check
@@ -20,7 +20,9 @@ needs `cargo install cargo-audit --locked` and skips itself without it, like
 the browser half without a JavaScript shell. The second audit asks OSV about
 `web/vendor/` and skips itself offline. GitHub Actions runs the Rust tests and
 both audits on every push and every Monday, never the browser half, which wants
-macOS (0013). Updating a vendored library means changing its version in
+macOS (0013). The Snowflake script is tested against a fake connector, so it
+needs no warehouse, only Python 3.10 or later, and skips itself without one.
+Updating a vendored library means changing its version in
 `scripts/audit_vendored.py` and `THIRD_PARTY_NOTICES.md` too: the audit fails
 when they disagree.
 
@@ -40,10 +42,13 @@ frontend fix does not exist in a release binary until it is rebuilt (see 0005).
 - **No new dependency** without a decision record saying why. The absence of a
   regex, YAML or HTTP crate is deliberate (0003).
 - **No build step for the frontend.** What ships is what is in `web/` (0004).
-- **Never run dbt, and never reach the warehouse from the server.** Both happen
-  elsewhere, under the user's own credentials (0002, 0008).
+- **Never run dbt.** The binary never talks to a warehouse either:
+  `tools/sf_lineage.py` does, started by the server only once the user switches
+  Snowflake lineage on, under their own credentials (0002, 0016).
 - **Never return or log a `.env` value.** Resolved locations and `DBT_TARGET`
   are the only things derived from them that leave the server (0012).
+- **Nothing outside the project is read or written**, except the one dbt profile
+  the Snowflake script names, through its own route (0017).
 - **Treat this repository as public.** Fixtures and examples are invented, never
   taken from a real project (0014).
 - **The browser is not trusted.** Every route sits behind the Host and Origin
@@ -72,13 +77,14 @@ frontend fix does not exist in a release binary until it is rebuilt (see 0005).
 | touch `src/envs.rs`, or evaluate Jinja | [0009](docs/decisions/0009-env-resolution-by-scanner.md) |
 | change the location table or the environment selector | [0010](docs/decisions/0010-moved-compares-parsed-with-built.md) |
 | persist anything, or add a write endpoint | [0011](docs/decisions/0011-settings-outside-the-project.md) |
-| add a field to a payload, a log line or a route | [0012](docs/decisions/0012-secrets-and-boundaries.md) |
+| add a field to a payload, a log line or a route | [0012](docs/decisions/0012-secrets-and-boundaries.md), [0017](docs/decisions/0017-the-profile-is-reachable.md) |
 | rename a function in `web/app.js`, or add a test | [0013](docs/decisions/0013-tests-without-a-toolchain.md) |
 | add a route, change the port logic, or add a CORS header | [0015](docs/decisions/0015-the-browser-is-not-trusted.md) |
+| start a process from the server, or touch `src/sidecar.rs` | [0016](docs/decisions/0016-column-lineage-on-demand.md) |
 | set this up for someone, rather than change it | [README, Getting started](README.md#getting-started) |
 | pick up the next piece of work | [docs/state.md](docs/state.md) |
 
-All fifteen decisions, with what was rejected each time, are indexed in
+All seventeen decisions, with what was rejected each time, are indexed in
 [docs/decisions/](docs/decisions/). The [README](README.md) is the user-facing
 documentation: what the tool does and how to use it. Rationale lives here, never
 in both.
@@ -87,7 +93,7 @@ in both.
 
 `src/manifest.rs` reads the manifest, `src/graph.rs` holds the compact graph,
 `src/api.rs` serves HTTP and WebSocket, and the remaining modules take one
-concern each: `envs`, `settings`, `git`, `collin`, `compiled`, `venv`, `files`,
-`pty`. `web/` is the frontend, `web/vendor/` the vendored libraries,
-`tools/sf_lineage.py` the only piece that talks to a warehouse. The README has
-the annotated version.
+concern each: `envs`, `settings`, `git`, `collin`, `sidecar`, `compiled`,
+`venv`, `files`, `pty`. `web/` is the frontend, `web/vendor/` the vendored
+libraries, `tools/sf_lineage.py` the only piece that talks to a warehouse. The
+README has the annotated version.

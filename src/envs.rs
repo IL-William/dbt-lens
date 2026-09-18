@@ -282,7 +282,8 @@ fn if_else(expr: &str) -> Option<(String, String)> {
     Some((texts[1].clone(), texts[2].clone()))
 }
 
-fn same_ident(a: &str, b: &str) -> bool {
+/// One warehouse identifier spelled two ways: case folded, one pair of quotes dropped.
+pub(crate) fn same_ident(a: &str, b: &str) -> bool {
     let bare = |s: &str| {
         let s = s.trim();
         if s.len() > 1 && s.starts_with('"') && s.ends_with('"') { s[1..s.len() - 1].to_ascii_lowercase() } else { s.to_ascii_lowercase() }

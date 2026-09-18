@@ -73,6 +73,7 @@ fn text(v: &Option<serde_json::Value>) -> String {
     }
 }
 
+#[derive(Clone)]
 pub struct Column {
     pub name: String,
     pub data_type: String,
@@ -84,6 +85,7 @@ pub struct Column {
     pub undeclared: bool,
 }
 
+#[derive(Clone)]
 pub struct Node {
     pub id: String,
     pub name: String,
@@ -170,7 +172,7 @@ pub struct ColEdge {
 
 /// Column-level edges, held flat rather than as per-column vectors: this
 /// large project has hundreds of thousands of columns, and two `Vec`s each would dwarf the edges.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ColLineage {
     edges: Vec<ColEdge>,
     /// Indices into `edges`, ordered by target, so incoming lookups binary search too.
@@ -198,6 +200,9 @@ impl ColLineage {
     }
 }
 
+/// Cloned only when column lineage fetched on a click is merged while a
+/// request still holds the previous graph (`Arc::make_mut`).
+#[derive(Clone)]
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub index: HashMap<String, u32>,
@@ -940,4 +945,91 @@ pub struct LineageNode<'a> {
     pub children: usize,
     pub hidden_up: usize,
     pub hidden_down: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collin::RawColEdge;
+
+    fn graph() -> Graph {
+        let model = |name: &str| {
+            serde_json::json!({
+                "name": name,
+                "resource_type": "model",
+                "package_name": "shop",
+                "columns": { "customer_id": { "name": "customer_id" } },
+            })
+        };
+        let raw: RawManifest = serde_json::from_value(serde_json::json!({
+            "nodes": {
+                "model.shop.stg_customers": model("stg_customers"),
+                "model.shop.dim_customers": model("dim_customers"),
+            },
+        }))
+        .unwrap();
+        Graph::build(raw, std::path::Path::new("manifest.json"), 0, 0)
+    }
+
+    fn edge(from_col: &str, to_col: &str) -> RawColEdge {
+        RawColEdge {
+            from: "model.shop.stg_customers".into(),
+            from_col: from_col.into(),
+            to: "model.shop.dim_customers".into(),
+            to_col: to_col.into(),
+            kind: "view".into(),
+        }
+    }
+
+    fn cache(edges: Vec<RawColEdge>) -> RawColLineage {
+        RawColLineage { version: 1, source: "snowflake".into(), edges, ..Default::default() }
+    }
+
+    /// Every edge by node and column name, so graphs whose positions differ compare.
+    fn named(g: &Graph) -> Vec<(String, String, String, String)> {
+        let name = |r: ColRef| {
+            let n = &g.nodes[r.node as usize];
+            (n.id.clone(), n.columns[r.col as usize].name.clone())
+        };
+        let mut out: Vec<_> = g
+            .cll
+            .as_ref()
+            .unwrap()
+            .edges
+            .iter()
+            .map(|e| {
+                let ((a, b), (c, d)) = (name(e.from), name(e.to));
+                (a, b, c, d)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    // A click merges the whole cache again into a graph that already holds the
+    // previous merge, instead of re-reading the manifest.
+    #[test]
+    fn merging_again_with_more_edges_matches_one_merge_of_them_all() {
+        let first = vec![edge("customer_id", "customer_id")];
+        // `address` is not declared, and sorts first: every earlier position moves.
+        let all = vec![edge("customer_id", "customer_id"), edge("address", "address")];
+        let dim = |g: &Graph| g.index["model.shop.dim_customers"];
+
+        let mut twice = graph();
+        twice.merge_col_lineage(cache(first), 1);
+        let before = twice.col_slot(dim(&twice), "customer_id");
+        twice.merge_col_lineage(cache(all.clone()), 2);
+        let after = twice.col_slot(dim(&twice), "customer_id");
+        assert_ne!(before, after, "the fixture must move a position, or it proves nothing");
+
+        let mut once = graph();
+        once.merge_col_lineage(cache(all), 2);
+
+        assert_eq!(named(&twice), named(&once));
+        assert_eq!((twice.meta.cll_edges, twice.meta.cll_mtime), (2, 2));
+        let slot = twice.col_slot(dim(&twice), "customer_id").unwrap();
+        assert_eq!(twice.cll.as_ref().unwrap().degree(ColRef { node: dim(&twice), col: slot }), (1, 0));
+        let columns = |g: &Graph| g.nodes[dim(g) as usize].columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+        assert_eq!(columns(&twice), columns(&once));
+    }
 }

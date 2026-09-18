@@ -6,7 +6,9 @@ to. Last updated 2026-09-17.
 ## Shipped
 
 Editor with clickable `ref()` and `source()` and Jinja coloured by role,
-lineage graph in model and column modes, terminal, file explorer with git and
+lineage graph in model and column modes, column lineage fetched from Snowflake
+when a column is clicked and the switch in Catalog > Columns is on (0016),
+terminal, file explorer with git and
 unsaved colouring, search across nodes and every file, Catalog with columns and
 locations, compiled SQL with freshness, git panel (status, branch switch, stage,
 commit, push, pull, conflicts, side-by-side diff), Python environment in the
@@ -41,19 +43,23 @@ installing means building from source, as
 deliberate later step: an unsigned executable download brings its own friction
 on a managed Windows machine.
 
-The VM can also build its own binary. On 2026-09-17, `cargo install --path .`
-succeeded there without administrator rights, with Rust's GNU toolchain and a
-mingw-w64 installed through winget, once the assembler that `raw-dylib` linking
-needs was on `PATH`. The README gives both that route and the cross-compile.
+A locked-down Windows machine can also build its own binary: `cargo install
+--path .` works there without administrator rights, with Rust's GNU toolchain
+and a mingw-w64 installed through winget, once the assembler that `raw-dylib`
+linking needs is on `PATH`. The README gives both that route and the
+cross-compile.
 
 ## Waiting on a human
 
-- **A real column-lineage cache.** `python3 tools/sf_lineage.py probe` has never
-  been run against a warehouse, so the permissions story is unverified.
-- **Two checks on the Windows VM**: `.env` files with CRLF endings read
-  correctly, and the time a node click takes on that machine. The plan was to
-  cache the per-node environment resolution only if it exceeded 10 ms, and it
-  measures well under that on a Mac.
+- **A real Snowflake answer.** Neither `probe` nor a column click has ever
+  reached a warehouse, so the permissions story is unverified: Enterprise
+  Edition, `VIEW LINEAGE`, and whether the objects of the chosen environment
+  carry lineage at all. Everything up to the connection is tested against a
+  fake connector.
+- **Two checks on Windows**: `.env` files with CRLF endings read correctly, and
+  the time a node click takes there. The plan was to cache the per-node
+  environment resolution only if it exceeded 10 ms, and it measures well under
+  that on a Mac.
 - **A release binary predating 2026-09-17 has no guard.** Anyone running one
   needs `cargo build --release` again, the old one being vulnerable to the
   three attacks 0015 describes.
@@ -65,6 +71,9 @@ needs was on `PATH`. The README gives both that route and the cross-compile.
   what produced the cache before trusting a screenshot of it.
 - **Release binaries embed the frontend** (0005). A frontend fix that appears to
   do nothing usually means the release binary was not rebuilt.
+- **Switching Snowflake lineage on proves nothing about Snowflake.** It checks
+  Python, the profile and the connector, all local. The first click is what
+  reaches the warehouse, and what may open a sign-in tab.
 - **The test harnesses slice `web/app.js` by function name** (0013). Renaming a
   sliced function breaks its harness; `./scripts/check.sh` catches it.
 - **Reaching the server by any name other than `127.0.0.1` or `localhost`
@@ -73,8 +82,8 @@ needs was on `PATH`. The README gives both that route and the cross-compile.
 
 ## Automated checks
 
-GitHub Actions runs `cargo test`, a RustSec audit of the lockfile and an OSV
-audit of `web/vendor/` on every push and every Monday, and Dependabot opens
-weekly lockfile bumps. CodeMirror is at 5.65.21 since 2026-09-17, which does
+GitHub Actions runs `cargo test`, a RustSec audit of the lockfile, an OSV audit
+of `web/vendor/` and the Snowflake script's tests on every push and every
+Monday, and Dependabot opens weekly lockfile bumps. CodeMirror is at 5.65.21 since 2026-09-17, which does
 not fix CVE-2025-6493 (SECURITY.md). The browser harnesses are not
 in CI: they need `jsc`, which ships with macOS (0013).

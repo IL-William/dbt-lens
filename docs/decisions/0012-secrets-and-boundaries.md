@@ -1,6 +1,6 @@
 # 0012. What may leave the server, and what may not
 
-Date: 2026-09-16 · Status: accepted
+Date: 2026-09-16 · Status: superseded by 0017
 
 **Trigger:** read before adding a field to any API payload, a log line, or a
 new route.

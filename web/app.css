@@ -599,6 +599,17 @@ kbd {
 .cols tr.c-focus td { background: var(--accent-dim); }
 .cols .c-lin { font: 10.5px var(--mono); white-space: nowrap; color: var(--fg-dim); }
 .cols .c-lin b { color: var(--accent); font-weight: 600; }
+.coltools .sfswitch[data-tone="on"] { border-color: var(--accent); color: var(--accent); }
+.coltools .sfswitch[data-tone="busy"] { border-color: var(--warn); color: var(--warn); }
+.coltools .sfswitch[data-tone="failed"] { border-color: #ef6b6b; color: #ef6b6b; }
+.coltools .colhint[data-tone="hint"] { color: var(--accent); }
+.coltools .colhint[data-tone="busy"] { color: var(--warn); }
+.coltools .colhint[data-tone="failed"] { color: #ef6b6b; }
+.cols .c-ask { color: var(--fg-dim); font-style: italic; }
+.cols tr.c-linked:hover .c-ask { color: var(--accent); font-style: normal; }
+.filelink { color: var(--accent); cursor: pointer; text-decoration: none; }
+#profile-chip .filelink { font: 11px var(--mono); }
+.filelink:hover { text-decoration: underline; }
 .cols .c-name { font-family: var(--mono); white-space: nowrap; }
 .cols .c-type { font-family: var(--mono); color: var(--source); white-space: nowrap; }
 .cols .c-desc { color: #b9c4d2; }

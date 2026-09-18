@@ -16,16 +16,24 @@ the editor reads and writes their files.
   another origin and refuses framing, so the terminal cannot be put under an
   invisible overlay on someone else's page.
 - **Every file path is confined to the opened project.** `..`, absolute paths,
-  drive letters and symlinks pointing out are refused.
+  drive letters and symlinks pointing out are refused. One file outside it is
+  reachable: the dbt profile the Snowflake script reads, which that script
+  names itself, and which only its own route serves. No path for it ever comes
+  from the browser.
 - **The editor reads the whole project, `.env` included.** That is what an
   editor is for. The environments panel, by contrast, never returns a `.env`
   value, only names and counts.
-- **No outbound network calls**, apart from the git commands you click.
+- **No outbound network calls of its own**, apart from the git commands you
+  click. Snowflake column lineage is a separate script, `tools/sf_lineage.py`,
+  which dbt-lens starts only while you have that switch on, and which opens a
+  connection only when you click a column. It reads your dbt profile itself, so
+  no credential passes through dbt-lens.
 
 ## Out of scope
 
 - The project you open is yours. Its git hooks run when you commit, as they
-  would from the command line.
+  would from the command line, and with Snowflake lineage switched on its
+  virtual environment's Python runs the lineage script.
 - Anything already running as your user on the same machine.
 - Exposing the port to the network with a tunnel or a proxy. It has no
   authentication and was never meant to be reached that way.
