@@ -80,6 +80,108 @@ impl RawColLineage {
     }
 }
 
+/// One cache file found next to the manifest.
+///
+/// `edges` is deliberately absent: the list is built by reading each file's
+/// header and discarding the edge array, so opening the selector does not parse
+/// tens of megabytes. The active cache's edge count comes from the graph, which
+/// already knows it.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+pub struct Available {
+    /// File name, never a path: it is what the UI shows and hands back, and a
+    /// path from the browser is a path the browser chose (0015).
+    pub file: String,
+    pub source: String,
+    pub target: String,
+    pub generated_at: String,
+    pub mtime: u64,
+}
+
+/// Just the header, with the edges parsed and thrown away.
+#[derive(serde::Deserialize, Default)]
+struct Header {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    target: String,
+    #[serde(default)]
+    generated_at: String,
+}
+
+/// Where a producer writes. One file per source, so two producers never contend
+/// for one file: that contention is what `other_source` exists to refuse.
+///
+/// The bare `column_lineage.json` is what every producer wrote before this
+/// existed, so an empty source keeps it rather than inventing a new name.
+pub fn path_for(target_dir: &Path, source: &str) -> std::path::PathBuf {
+    let clean: String = source
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect::<String>()
+        .to_lowercase();
+    if clean.is_empty() {
+        target_dir.join("column_lineage.json")
+    } else {
+        target_dir.join(format!("column_lineage.{clean}.json"))
+    }
+}
+
+/// Every cache in the target directory, most recently written first.
+///
+/// A file that cannot be read is left out rather than reported: the selector
+/// offers what can actually be loaded, and `load` still explains itself when one
+/// of them is chosen and turns out to be broken.
+pub fn discover(target_dir: &Path) -> Vec<Available> {
+    let Ok(entries) = std::fs::read_dir(target_dir) else { return Vec::new() };
+    let mut out: Vec<Available> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("column_lineage") || !name.ends_with(".json") {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(head) = serde_json::from_slice::<Header>(&bytes) else { continue };
+        if head.version > 1 {
+            continue;
+        }
+        out.push(Available {
+            file: name,
+            source: head.source,
+            target: head.target,
+            generated_at: head.generated_at,
+            mtime: std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        });
+    }
+    out.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.file.cmp(&b.file)));
+    out
+}
+
+/// The cache to load when the user has not chosen one: the most recent, which
+/// is almost always the one just written.
+pub fn default_choice(found: &[Available]) -> Option<&Available> {
+    found.first()
+}
+
+/// Resolves a file name coming from the browser against what discovery found.
+///
+/// Nothing from the request reaches the filesystem: the name must match a file
+/// already discovered, so a crafted name cannot walk out of the target
+/// directory (0015).
+pub fn resolve_choice<'a>(found: &'a [Available], wanted: &str) -> Option<&'a Available> {
+    found.iter().find(|a| a.file == wanted)
+}
+
 /// Why a cache from another source is left alone: a synthetic cache looks
 /// exactly like a real one, and completing it would make every edge suspect.
 pub fn other_source(path: &Path, source: &str) -> String {
@@ -406,6 +508,59 @@ mod tests {
         assert_eq!(loaded.edges[1], edge("customer_key"));
         assert_eq!(loaded.errors, ["model.shop.x.y: denied"], "a dump's errors survive a merge");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_source_gets_its_own_file_and_the_legacy_name_survives() {
+        let t = Path::new("/t");
+        assert_eq!(path_for(t, "snowflake"), t.join("column_lineage.snowflake.json"));
+        assert_eq!(path_for(t, "Collin"), t.join("column_lineage.collin.json"));
+        // No source is the file every producer wrote before this existed.
+        assert_eq!(path_for(t, ""), t.join("column_lineage.json"));
+        // A name from a cache file is data from outside, so it cannot build a path.
+        assert_eq!(path_for(t, "../../etc/passwd"), t.join("column_lineage.etcpasswd.json"));
+    }
+
+    #[test]
+    fn discovery_reads_headers_and_orders_by_recency() {
+        let dir = std::env::temp_dir().join(format!("dbt-lens-collin-disc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
+        write(
+            "column_lineage.snowflake.json",
+            r#"{"version":1,"source":"snowflake","target":"dev","generated_at":"2026-01-01T00:00:00Z","edges":[]}"#,
+        );
+        write(
+            "column_lineage.collin.json",
+            r#"{"version":1,"source":"collin","target":"qa","generated_at":"2026-02-02T00:00:00Z","edges":[{"from":"a","from_col":"x","to":"b","to_col":"y","kind":"passthrough"}]}"#,
+        );
+        // Not a cache, and a cache this build is too old to read.
+        write("manifest.json", r#"{"nodes":{}}"#);
+        write("column_lineage.future.json", r#"{"version":9,"source":"later","edges":[]}"#);
+        write("column_lineage.broken.json", "{not json");
+
+        let found = discover(&dir);
+        let names: Vec<&str> = found.iter().map(|a| a.file.as_str()).collect();
+        assert_eq!(names.len(), 2, "only the readable caches: {names:?}");
+        assert!(names.contains(&"column_lineage.collin.json"));
+        assert!(names.contains(&"column_lineage.snowflake.json"));
+
+        let collin = found.iter().find(|a| a.source == "collin").unwrap();
+        assert_eq!(collin.target, "qa");
+        assert_eq!(collin.generated_at, "2026-02-02T00:00:00Z");
+
+        // A name from the browser only ever selects something already found.
+        assert!(resolve_choice(&found, "column_lineage.collin.json").is_some());
+        assert!(resolve_choice(&found, "../manifest.json").is_none());
+        assert!(resolve_choice(&found, "column_lineage.broken.json").is_none());
+        assert!(default_choice(&found).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn discovery_of_a_missing_directory_is_empty_not_an_error() {
+        assert!(discover(Path::new("/nope/not/here")).is_empty());
     }
 
     #[test]

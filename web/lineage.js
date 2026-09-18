@@ -23,6 +23,55 @@ const Lineage = (() => {
   /* Anything else is a custom materialization, and deserves to be noticed. */
   const CUSTOM = '#ff6ec7';
 
+  /* Column mode colours the edge rather than the box. Where a column is stored
+     is not what you are reading that graph for: what happened to it between two
+     models is.
+
+     Its own palette, sharing no colour with the materializations: in column mode
+     the boxes still carry the owning model's materialization, so both channels
+     are on screen at once and a shared colour would read as a relationship that
+     is not there. The ramp runs quiet to loud, because that is the order you
+     care about: a passthrough is not news, a transform is. `inferred` is the
+     dullest of all, being the one the producer did not read out of the SQL. */
+  const ROLE = {
+    passthrough: '#c3ccd6',
+    rename: '#9fb0c4',
+    cast: '#c9b08a',
+    aggregate: '#cf7a3f',
+    window: '#8b46c9',
+    transform: '#d94f4f',
+    inferred: '#5f6a78',
+    /* Not an edge kind: the badge a column with no incoming edge in view gets.
+       That column is where the graph starts, which is raw rather than unknown. */
+    raw: '#7fb069',
+  };
+  /* The plain edge colour, also used for a role this build does not know: a
+     cache from another producer may use words that did not exist when this
+     shipped, and a wrong hue would claim more than a neutral one. */
+  const EDGE_PLAIN = '#33445c';
+
+  function roleColor(kind) {
+    return ROLE[String(kind || '').toLowerCase()] || EDGE_PLAIN;
+  }
+
+  /* What produced each column, read off its incoming edges, so the badge sits on
+     the thing it describes instead of making you trace a line back.
+
+     A column fed by several edges of different roles is `mixed`, which has no
+     colour of its own on purpose: it falls back to the neutral, because naming
+     one of the roles would be picking a winner at random. A column with nothing
+     feeding it inside the current view is where the graph starts, and that is
+     `raw` rather than unknown. */
+  function nodeRoles(d) {
+    const found = d.nodes.map(() => '');
+    (d.edges || []).forEach(([, to], i) => {
+      const kind = (d.edge_kinds && d.edge_kinds[i]) || '';
+      if (!kind) return;
+      found[to] = !found[to] ? kind : (found[to] === kind ? kind : 'mixed');
+    });
+    return found.map((role, i) => role || (d.nodes[i].hidden_up ? '' : 'raw'));
+  }
+
   function nodeColor(n) {
     if (n.kind && n.kind !== 'model') return KIND[n.kind] || KIND.other;
     const m = (n.materialized || '').toLowerCase();
@@ -156,13 +205,15 @@ const Lineage = (() => {
     W = columnMode ? 180 : 200;
     H = columnMode ? 40 : 48;
     selected = d.nodes[d.focus] ? d.nodes[d.focus].id : null;
+    // Column mode only: in model mode the box colour already carries the answer.
+    const roles = columnMode ? nodeRoles(d) : [];
     place = layout(d);
     root.textContent = '';
 
     const edgeLayer = el('g'), nodeLayer = el('g');
     root.appendChild(edgeLayer); root.appendChild(nodeLayer);
 
-    for (const [a, b] of d.edges) {
+    d.edges.forEach(([a, b], i) => {
       const p1 = place[a], p2 = place[b];
       const x1 = p1.x + W, y1 = p1.y + H / 2, x2 = p2.x, y2 = p2.y + H / 2;
       const dx = Math.max(34, (x2 - x1) * 0.45);
@@ -170,8 +221,16 @@ const Lineage = (() => {
         class: 'edge', 'data-a': d.nodes[a].id, 'data-b': d.nodes[b].id,
         d: `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`,
       });
+      // A custom property, not `stroke`: setting the property leaves `.edge.hi`
+      // free to override the stroke outright, so selecting an edge still turns
+      // it accent-coloured instead of keeping its role hue.
+      const kind = d.edge_kinds && d.edge_kinds[i];
+      if (kind) {
+        path.dataset.kind = kind;
+        path.style.setProperty('--edge-col', roleColor(kind));
+      }
       edgeLayer.appendChild(path);
-    }
+    });
 
     d.nodes.forEach((n, i) => {
       const g = el('g', { class: 'nd' + (i === d.focus ? ' focus' : '') + (n.disabled ? ' off' : ''), transform: `translate(${place[i].x},${place[i].y})` });
@@ -191,6 +250,8 @@ const Lineage = (() => {
       const t2 = el('text', { class: 't2', x: 12, y: 35 });
       t2.textContent = clip(subtitle(n), columnMode ? 30 : 34);
       g.appendChild(t2);
+
+      if (roles[i]) g.appendChild(roleBadge(roles[i]));
 
       if (n.hidden_up) g.appendChild(badge(-16, H / 2, `+${n.hidden_up}`, 'up'));
       if (n.hidden_down) g.appendChild(badge(W + 16, H / 2, `+${n.hidden_down}`, 'down'));
@@ -213,6 +274,31 @@ const Lineage = (() => {
 
     fit();
     select(selected);
+  }
+
+  /* The role, as a tag above the box rather than inside it: both lines of a
+     column box are already full, and a badge that overlaps a column name is
+     worse than no badge. VGAP leaves room, and fit() pads beyond it.
+
+     Dark fill with a coloured outline, not a coloured fill: the role ramp runs
+     from a light slate to a dark grey, so one text colour could never stay
+     legible across all of them. */
+  function roleBadge(role) {
+    const label = role.toUpperCase();
+    const w = label.length * 5.8 + 12;
+    const colour = roleColor(role);
+    const g = el('g', { class: 'rolebadge' });
+    g.appendChild(el('rect', {
+      x: W - w - 4, y: -14, width: w, height: 14, rx: 3,
+      style: `fill:#131922;stroke:${colour}`,
+    }));
+    const t = el('text', {
+      class: 'rolelabel', x: W - w / 2 - 4, y: -4, 'text-anchor': 'middle',
+      style: `fill:${colour}`,
+    });
+    t.textContent = label;
+    g.appendChild(t);
+    return g;
   }
 
   function badge(x, y, label, dir) {
@@ -252,5 +338,5 @@ const Lineage = (() => {
     handlers.onHoverClose && handlers.onHoverClose();
   };
 
-  return { init, render, fit, select, clear, subtitle, nodeColor, matLabel };
+  return { init, render, fit, select, clear, subtitle, nodeColor, matLabel, roleColor, nodeRoles };
 })();

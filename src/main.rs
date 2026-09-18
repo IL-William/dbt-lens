@@ -70,9 +70,35 @@ async fn main() -> anyhow::Result<()> {
     }
     let manifest_path = args.manifest.unwrap_or_else(|| root.join("target").join("manifest.json"));
     let catalog_path = args.catalog.unwrap_or_else(|| root.join("target").join("catalog.json"));
-    let cll_path = args
-        .column_lineage
-        .unwrap_or_else(|| root.join("target").join("column_lineage.json"));
+    // The store is built here rather than inside AppState because the cache the
+    // user last chose decides which file is loaded before the graph exists.
+    let settings = settings::Store::new(&root);
+    let target_dir = manifest_path.parent().map(Path::to_path_buf).unwrap_or_else(|| root.join("target"));
+    let cll_path = args.column_lineage.clone().unwrap_or_else(|| {
+        // A project can hold one cache per producer. Honour the saved choice,
+        // fall back to the most recent, and keep the legacy name when there is
+        // nothing to choose from.
+        let found = collin::discover(&target_dir);
+        let saved = settings.load().cll_file;
+        let chosen = saved
+            .as_deref()
+            .and_then(|f| collin::resolve_choice(&found, f))
+            .or_else(|| collin::default_choice(&found));
+        match chosen {
+            Some(c) => target_dir.join(&c.file),
+            None => target_dir.join("column_lineage.json"),
+        }
+    });
+    if args.column_lineage.is_none() {
+        let found = collin::discover(&target_dir);
+        if found.len() > 1 {
+            let names: Vec<String> = found
+                .iter()
+                .map(|a| if a.source.is_empty() { a.file.clone() } else { a.source.clone() })
+                .collect();
+            eprintln!("  {} column lineage caches: {}", found.len(), names.join(", "));
+        }
+    }
 
     let graph = if manifest_path.exists() {
         eprintln!("  reading {}", manifest_path.display());
@@ -113,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
         root: root.clone(),
         manifest_path,
         catalog_path,
-        cll_path,
+        cll_path: std::sync::RwLock::new(cll_path),
         target_dir,
         venv: venv.clone(),
         file_index: tokio::sync::RwLock::new(Arc::new(files::scan(&root))),

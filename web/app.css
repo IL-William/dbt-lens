@@ -453,7 +453,9 @@ kbd {
 #graph { width: 100%; height: 100%; display: block; background: var(--bg); cursor: grab; }
 #graph.panning { cursor: grabbing; }
 #graph text { font-family: var(--ui); user-select: none; }
-.edge { fill: none; stroke: #33445c; stroke-width: 1.2; }
+/* --edge-col is set per path in column mode, where the colour carries the role.
+   `.edge.hi` still outranks it, so selecting an edge highlights it as before. */
+.edge { fill: none; stroke: var(--edge-col, #33445c); stroke-width: 1.2; }
 .edge.hi { stroke: var(--accent); stroke-width: 2; }
 .nd rect.box { fill: var(--bg-3); stroke: var(--line); stroke-width: 1; rx: 5; }
 .nd:hover rect.box { stroke: var(--fg-dim); }
@@ -646,7 +648,10 @@ kbd {
 .cols tr:hover td { background: #1a212c; }
 .cols tr.c-linked { cursor: pointer; }
 .cols tr.c-linked:hover td { background: #1f2b3a; }
-.cols tr.c-linked:hover .c-name { color: var(--accent); }
+/* The name is not part of the click target, so it gets a text cursor and keeps
+   its colour on hover. The lineage cell is what lights up instead. */
+.cols tr.c-linked .c-name { cursor: text; user-select: text; }
+.cols tr.c-linked:hover .c-lin { color: var(--accent); }
 .cols tr.c-focus td { background: var(--accent-dim); }
 .cols .c-lin { font: 10.5px var(--mono); white-space: nowrap; color: var(--fg-dim); }
 .cols .c-lin b { color: var(--accent); font-weight: 600; }
@@ -704,3 +709,7 @@ kbd {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #2b3746; border-radius: 5px; border: 2px solid var(--bg-2); }
 ::-webkit-scrollbar-thumb:hover { background: #3b4a5d; }
+
+/* The role tag above a column box. Its colours are inline, set per role. */
+.rolelabel { font: 8.5px var(--mono); letter-spacing: .4px; }
+.rolebadge rect { stroke-width: 1; }

@@ -1451,7 +1451,7 @@ async function focusNode(id, { open = false } = {}) {
     Lineage.render(sub);
     $('#lineage-status').textContent =
       `${sub.nodes.length} nodes · ${sub.edges.length} edges${sub.truncated ? ' · truncated' : ''}`;
-    paintLegend(sub.nodes);
+    paintLegend(sub);
     renderCatalog(detail);
     if (!$('#dock-compiled').classList.contains('hidden')) loadCompiled(id);
     if (open && detail.file) openFile(detail.file, { focusLineage: false });
@@ -1479,7 +1479,7 @@ async function focusColumn(id, column) {
     Lineage.render(sub);
     $('#lineage-status').textContent =
       `${sub.focus_column} · ${sub.nodes.length} columns · ${sub.edges.length} edges${sub.truncated ? ' · truncated' : ''}`;
-    paintLegend(sub.nodes);
+    paintLegend(sub);
     showDock('lineage');
   } catch (e) {
     toast('column lineage: ' + e.message, 'err');
@@ -1541,6 +1541,134 @@ function columnsHint(sc, cached) {
   if (sc.state === 'starting') return { text: 'starting the Snowflake script', tone: 'busy' };
   if (sc.state === 'busy') return { text: 'querying Snowflake', tone: 'busy' };
   return cached ? null : { text: 'click a column to fetch its lineage from Snowflake', tone: 'hint' };
+}
+
+/* How old a cache is, in the shortest form that is still honest. */
+function cacheAge(mtime) {
+  if (!mtime) return '';
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - mtime);
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return `${Math.floor(secs / 60)}min ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+}
+
+/* What one entry of the producer menu reads as. A cache with no source field is
+   not named "unknown" but by its file, which is the only true thing about it. */
+function sourceLabel(src) {
+  const name = src.source || src.file.replace(/^column_lineage\.?|\.json$/g, '') || src.file;
+  const bits = [src.target, cacheAge(src.mtime)].filter(Boolean);
+  return { name, sub: bits.join(' · ') };
+}
+
+/* The producer of the column lineage on screen.
+
+   One control rather than two: the graph holds one source at a time, so picking
+   a cache and switching Snowflake fetching on are the same decision made twice.
+   The live entry is last and marked, because it is the only one that reaches a
+   warehouse. */
+function sourceMenu() {
+  const wrap = document.createElement('span');
+  wrap.className = 'srcpick';
+  const b = document.createElement('button');
+  b.id = 'cll-source';
+  b.className = 'btn sm';
+  paintSourceButton(b);
+  b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openSourceMenu(b);
+  });
+  wrap.appendChild(b);
+  return wrap;
+}
+
+function paintSourceButton(b = $('#cll-source')) {
+  if (!b) return;
+  if (sidecarOn()) {
+    const label = sidecarLabel(S.sidecar);
+    b.textContent = `source: Snowflake, live \u25be`;
+    b.dataset.tone = label.tone;
+    b.title = label.title;
+    return;
+  }
+  const active = (S.cllSources || []).find((x) => x.file === S.cllActive);
+  if (!active) {
+    b.textContent = 'source: none \u25be';
+    b.dataset.tone = 'off';
+    b.title = 'No column lineage cache beside the manifest. Generate one, or switch on Snowflake to fetch per column.';
+    return;
+  }
+  const { name, sub } = sourceLabel(active);
+  b.textContent = `source: ${name} \u25be`;
+  b.dataset.tone = 'on';
+  b.title = `column lineage from ${name}${sub ? ` (${sub})` : ''}\n${active.file}`;
+}
+
+function openSourceMenu(anchor) {
+  closeMenus();
+  const menu = document.createElement('div');
+  menu.className = 'envmenu';
+  const add = (name, sub, on, onPick) => {
+    const item = document.createElement('button');
+    const check = document.createElement('span');
+    check.className = 'check';
+    check.textContent = on ? '\u2713' : '';
+    const lbl = document.createElement('span');
+    lbl.className = 'lbl';
+    lbl.textContent = name;
+    item.append(check, lbl);
+    if (sub) {
+      const s = document.createElement('span');
+      s.className = 'sub';
+      s.textContent = sub;
+      item.appendChild(s);
+    }
+    if (on) item.classList.add('on');
+    item.addEventListener('click', () => { closeMenus(); onPick(); });
+    menu.appendChild(item);
+  };
+
+  const sources = S.cllSources || [];
+  if (!sources.length) {
+    const p = document.createElement('div');
+    p.className = 'sub';
+    p.style.padding = '5px 8px';
+    p.textContent = 'no cache beside the manifest';
+    menu.appendChild(p);
+  }
+  for (const src of sources) {
+    const { name, sub } = sourceLabel(src);
+    add(name, sub, !sidecarOn() && src.file === S.cllActive, () => selectSource(src.file));
+  }
+  if (sources.length) menu.appendChild(document.createElement('hr'));
+  add('Snowflake, live', 'fetches on click', sidecarOn(), () => setSidecar(true));
+  if (sidecarOn()) add('stop fetching', '', false, () => setSidecar(false));
+
+  document.body.appendChild(menu);
+  const r = anchor.getBoundingClientRect();
+  menu.style.left = `${Math.max(6, Math.min(r.left, window.innerWidth - menu.offsetWidth - 6))}px`;
+  menu.style.top = `${r.bottom + 4}px`;
+  setTimeout(() => document.addEventListener('click', closeMenus, { once: true }), 0);
+}
+
+function closeMenus() {
+  $$('.envmenu').forEach((m) => m.remove());
+}
+
+async function selectSource(file) {
+  if (sidecarOn()) await setSidecar(false);
+  try {
+    const meta = await api.post('/api/collineage/source', { file });
+    S.meta = Object.assign({}, S.meta, meta);
+    S.cllActive = file;
+    paintSourceButton();
+    paintChips();
+    if (S.node) renderCatalog(S.node);
+    rerender();
+    toast(`column lineage from ${meta.cll_source || file}`);
+  } catch (e) {
+    toast('column lineage source: ' + e.message, 'err');
+  }
 }
 
 function sidecarSwitch() {
@@ -1708,13 +1836,27 @@ async function openColumn(n, column) {
   }
 }
 
-/* Only the materializations present in the current graph, so the legend stays
-   short and always matches what is drawn. */
-function paintLegend(nodes) {
+/* Only what is actually on screen, so the legend stays short and always matches
+   what is drawn.
+
+   Model mode explains the boxes, whose colour is the materialization. Column
+   mode explains the edges instead, whose colour is what happened to the column:
+   that is the question the column graph exists to answer, and repeating the
+   materializations there would explain something nobody is looking at. */
+function paintLegend(sub) {
   const seen = new Map();
-  for (const n of nodes) {
-    const label = Lineage.matLabel(n);
-    if (!seen.has(label)) seen.set(label, Lineage.nodeColor(n));
+  const kinds = sub.edge_kinds || [];
+  if (kinds.length) {
+    // The badges too, not just the edges: `raw` and `mixed` only ever appear on
+    // a box, and a legend that skipped them would leave two colours unexplained.
+    for (const k of kinds.concat(Lineage.nodeRoles(sub))) {
+      if (k && !seen.has(k)) seen.set(k, Lineage.roleColor(k));
+    }
+  } else {
+    for (const n of sub.nodes) {
+      const label = Lineage.matLabel(n);
+      if (!seen.has(label)) seen.set(label, Lineage.nodeColor(n));
+    }
   }
   const host = $('#lineage-legend');
   host.textContent = '';
@@ -2833,7 +2975,7 @@ function catalogColumns(body, n) {
   note.textContent = untyped === n.columns.length
     ? 'no types: run dbt compile --write-catalog to pull them from Snowflake'
     : `${n.columns.length - untyped}/${n.columns.length} typed`;
-  tools.append(note, sidecarSwitch());
+  tools.append(note, sourceMenu());
   const hint = columnsHint(S.sidecar, n.columns.some((c) => c.up || c.down));
   if (hint) {
     const span = document.createElement('span');
@@ -2918,7 +3060,14 @@ function catalogColumns(body, n) {
       if (c.up || c.down || live) {
         tr.classList.add('c-linked');
         tr.title = live ? `fetch the lineage of ${c.name} from Snowflake` : `column lineage for ${c.name}`;
-        tr.addEventListener('click', () => openColumn(n, c.name));
+        // The name cell is left out of the click target on purpose: copying a
+        // column name is the more common thing to want, and a click target
+        // makes the text impossible to select. The rest of the row still opens
+        // the lineage, so column mode stays reachable from here.
+        tr.addEventListener('click', (e) => {
+          if (e.target.closest('.c-name')) return;
+          openColumn(n, c.name);
+        });
       }
       tr.appendChild(lin);
     }

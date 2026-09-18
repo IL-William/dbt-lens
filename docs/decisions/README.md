@@ -26,6 +26,7 @@ it is built this way, for whoever changes it next.
 | [0018](0018-project-vars-by-scanner.md) | The `vars:` block is read by a scanner, not a YAML parser | reading a `.yml` file from the server, or reaching for a YAML parser |
 | [0019](0019-a-resolved-value-may-be-shown.md) | A resolved value may reach the browser, under two guards | returning any value derived from a `.env` file |
 | [0020](0020-search-never-opens-an-env-file.md) | A content search never opens a `.env` file | making the server read files it was not asked for by name |
+| [0021](0021-one-cache-file-per-producer.md) | One column-lineage cache per producer, and the user picks | adding a source of column lineage, or changing where one writes |
 
 ## Keeping these honest
 
