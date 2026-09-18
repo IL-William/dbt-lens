@@ -118,6 +118,13 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
     std::fs::write(&tmp, bytes)?;
+    // A rename puts a new file in the target's place, carrying whatever mode the
+    // umask gave it rather than the one the target had. Settings do not care;
+    // `~/.dbt/profiles.yml` does, since it can hold a warehouse password and is
+    // commonly 0600 (0017). Without this, saving it from the editor once turns
+    // it into 0644. The in-place fallback below truncates rather than replaces,
+    // so it keeps the mode on its own.
+    keep_mode(path, &tmp);
     let mut last_error = None;
     for attempt in 0..3 {
         match std::fs::rename(&tmp, path) {
@@ -135,6 +142,22 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let _ = std::fs::remove_file(&tmp);
     std::fs::write(path, bytes).map_err(|e| last_error.unwrap_or(e))
 }
+
+/// Gives `tmp` the mode `target` already has, so replacing it does not widen it.
+/// A target that does not exist yet leaves the umask to decide, which is what
+/// creating a file normally does.
+#[cfg(unix)]
+fn keep_mode(target: &Path, tmp: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(target) {
+        let _ = std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(meta.permissions().mode()));
+    }
+}
+
+/// Windows has no mode to carry: a new file takes its ACL from the directory,
+/// which is where the target's came from too.
+#[cfg(not(unix))]
+fn keep_mode(_target: &Path, _tmp: &Path) {}
 
 pub struct Store {
     pub path: Option<PathBuf>,
@@ -194,6 +217,48 @@ mod tests {
 
     fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
         move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| OsString::from(*v))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_keeps_a_private_file_private() {
+        // `~/.dbt/profiles.yml` holds warehouse credentials and is commonly
+        // 0600. Replacing it through a rename used to hand it back at 0644.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("dbt-lens-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("profiles.yml");
+        std::fs::write(&path, b"before\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_atomic(&path, b"after\n").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the mode must survive the write");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after\n");
+        // No temp file left behind next to a credential file.
+        let strays: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("tmp-"))
+            .collect();
+        assert!(strays.is_empty(), "left behind {strays:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_leaves_a_new_file_to_the_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("dbt-lens-mode-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        write_atomic(&path, b"{}\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert!(mode != 0, "a created file still gets a mode");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
