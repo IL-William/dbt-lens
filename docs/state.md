@@ -53,11 +53,16 @@ startup banner and in the status bar, because until then two installs of the
 same release were indistinguishable and reinstalling on the VM looked like it
 had done nothing.
 
-0.1.0 is tagged and released on GitHub as source only. No binary is attached, so
-installing means building from source, as
+0.2.0 is tagged, as 0.1.0 was, and released on GitHub as source only. No binary
+is attached, so installing means building from source, as
 [the README](../README.md#getting-started) describes. Attaching binaries is a
 deliberate later step: an unsigned executable download brings its own friction
 on a managed Windows machine.
+
+Since 0.2.0 the binary says which build it is, so `--version` and the status bar
+tell two installs of one release apart. Updating a machine is `git pull` then
+`cargo install --path . --locked`, and comparing the stamp with `git describe`
+in the clone is how you check it took.
 
 A locked-down Windows machine can also build its own binary: `cargo install
 --path .` works there without administrator rights, with Rust's GNU toolchain
