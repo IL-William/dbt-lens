@@ -607,6 +607,8 @@ kbd {
 .coltools .colhint[data-tone="failed"] { color: #ef6b6b; }
 .cols .c-ask { color: var(--fg-dim); font-style: italic; }
 .cols tr.c-linked:hover .c-ask { color: var(--accent); font-style: normal; }
+.filelink { color: var(--accent); cursor: pointer; text-decoration: none; }
+.filelink:hover { text-decoration: underline; }
 .cols .c-name { font-family: var(--mono); white-space: nowrap; }
 .cols .c-type { font-family: var(--mono); color: var(--source); white-space: nowrap; }
 .cols .c-desc { color: #b9c4d2; }

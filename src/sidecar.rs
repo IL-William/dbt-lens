@@ -64,11 +64,36 @@ pub struct Status {
     pub role: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub authenticator: String,
+    /// The profiles.yml the script read, announced before it read it, so it is
+    /// known even when reading it is what failed. Kept when the script stops.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub profiles: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub error: String,
     /// The script's last stderr lines, kept only after a failure.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub log: Vec<String>,
+}
+
+/// Why a query failed, and whose fault it points at: a connection Snowflake
+/// refused is about the profile, a query it rejected is about the object or
+/// the role, and a request this build got wrong is neither.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryError {
+    pub message: String,
+    pub phase: String,
+}
+
+impl QueryError {
+    fn own(message: impl Into<String>) -> QueryError {
+        QueryError { message: message.into(), phase: String::new() }
+    }
+}
+
+impl std::fmt::Display for QueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 /// A program that can run the script, with the arguments that go before it.
@@ -140,6 +165,12 @@ pub struct Sidecar {
     enabled: AtomicBool,
     running: tokio::sync::Mutex<Option<Running>>,
     status: Mutex<Status>,
+    /// The profile the script named. Outlives the script, so the file stays
+    /// reachable while the switch is off, which is when it gets corrected.
+    profiles: Mutex<Option<PathBuf>>,
+    /// What the last start used. A restart repeats it rather than working it
+    /// out again, so it cannot quietly pick another interpreter.
+    launch: Mutex<Option<(Vec<Interpreter>, PathBuf, PathBuf)>>,
     /// The running script's cancel signal, reachable without the lock that a
     /// request waiting on Snowflake holds.
     cancel: Mutex<Option<Arc<Notify>>>,
@@ -152,6 +183,8 @@ impl Sidecar {
             enabled: AtomicBool::new(enabled),
             running: tokio::sync::Mutex::new(None),
             status: Mutex::new(Status { state: "off", ..Default::default() }),
+            profiles: Mutex::new(None),
+            launch: Mutex::new(None),
             cancel: Mutex::new(None),
             deadlines,
         }
@@ -174,7 +207,16 @@ impl Sidecar {
         matches!(self.status().state, "ready" | "busy")
     }
 
-    fn set_status(&self, status: Status) -> Status {
+    /// The profile the script named, if it ever did.
+    pub fn profile_path(&self) -> Option<PathBuf> {
+        self.profiles.lock().ok().and_then(|p| p.clone())
+    }
+
+    fn set_status(&self, mut status: Status) -> Status {
+        // Carried by every status, whatever the script is doing now.
+        if let Some(path) = self.profile_path() {
+            status.profiles = path.display().to_string();
+        }
         if let Ok(mut s) = self.status.lock() {
             *s = status.clone();
         }
@@ -205,6 +247,17 @@ impl Sidecar {
         self.start(&interpreters(root, env), &script, root).await
     }
 
+    /// Stops and starts again, on what the last start used. The script reads
+    /// the profile once, so this is what a corrected profile needs.
+    pub async fn restart(&self, root: &Path, env: &VenvInfo) -> Status {
+        self.stop().await;
+        let last = self.launch.lock().ok().and_then(|l| l.clone());
+        match last {
+            Some((candidates, script, cwd)) => self.start(&candidates, &script, &cwd).await,
+            None => self.start_for(root, env).await,
+        }
+    }
+
     /// Starts the script unless it is running. The script checks everything
     /// that needs no network before it says it is ready, so a broken setup
     /// shows up here rather than on a click.
@@ -212,6 +265,9 @@ impl Sidecar {
         let mut slot = self.running.lock().await;
         if slot.is_some() {
             return self.status();
+        }
+        if let Ok(mut last) = self.launch.lock() {
+            *last = Some((candidates.to_vec(), script.to_path_buf(), cwd.to_path_buf()));
         }
         self.set_status(Status { state: "starting", ..Default::default() });
 
@@ -284,8 +340,16 @@ impl Sidecar {
 
         let ready = tokio::time::timeout(self.deadlines.ready, async {
             while let Some(value) = run.replies.recv().await {
-                if value.get("event").and_then(|e| e.as_str()) == Some("ready") {
-                    return Some(value);
+                match value.get("event").and_then(|e| e.as_str()) {
+                    // Announced before the file is read, so a profile that
+                    // cannot be read is still a profile that can be opened.
+                    Some("profiles") => {
+                        if let (Ok(mut held), Some(path)) = (self.profiles.lock(), value.get("path").and_then(|p| p.as_str())) {
+                            *held = Some(PathBuf::from(path));
+                        }
+                    }
+                    Some("ready") => return Some(value),
+                    _ => {}
                 }
             }
             None
@@ -328,10 +392,10 @@ impl Sidecar {
 
     /// Column pairs around one column, in one direction. Requests go one at a
     /// time, because the script holds a single connection.
-    pub async fn query(&self, relation: &str, column: &str, direction: &str, depth: u32) -> Result<Vec<RelEdge>, String> {
+    pub async fn query(&self, relation: &str, column: &str, direction: &str, depth: u32) -> Result<Vec<RelEdge>, QueryError> {
         let mut slot = self.running.lock().await;
         let Some(run) = slot.as_mut() else {
-            return Err("the Snowflake script is not running".into());
+            return Err(QueryError::own("the Snowflake script is not running"));
         };
         run.next_id += 1;
         let id = run.next_id;
@@ -364,22 +428,24 @@ impl Sidecar {
             Waited::Answer(reply) => {
                 self.set_state("ready");
                 if let Some(error) = reply.get("error").and_then(|e| e.as_str()) {
-                    return Err(error.to_string());
+                    let phase = reply.get("phase").and_then(|p| p.as_str()).unwrap_or_default();
+                    return Err(QueryError { message: error.to_string(), phase: phase.to_string() });
                 }
                 run.signed_in = true;
                 let rows = reply.get("rows").cloned().unwrap_or_else(|| serde_json::json!([]));
-                serde_json::from_value(rows).map_err(|e| format!("the Snowflake script sent a reply this build cannot read: {e}"))
+                serde_json::from_value(rows)
+                    .map_err(|e| QueryError::own(format!("the Snowflake script sent a reply this build cannot read: {e}")))
             }
             Waited::Cancelled => {
                 if let Some(run) = slot.take() {
                     self.shut(run).await;
                 }
-                Err("Snowflake lineage was switched off".into())
+                Err(QueryError::own("Snowflake lineage was switched off"))
             }
             Waited::Gone | Waited::Late => {
                 let late = matches!(waited, Waited::Late);
                 let Some(run) = slot.take() else {
-                    return Err("the Snowflake script is not running".into());
+                    return Err(QueryError::own("the Snowflake script is not running"));
                 };
                 if let Ok(mut c) = self.cancel.lock() {
                     *c = None;
@@ -392,7 +458,7 @@ impl Sidecar {
                 };
                 let python = self.status().python;
                 self.fail(python, error.clone(), log);
-                Err(error)
+                Err(QueryError::own(error))
             }
         }
     }
@@ -555,7 +621,7 @@ done
                 kind: "view".into(),
             }]
         );
-        assert_eq!(car.query("X.Y.Z", "c", "UPSTREAM", 1).await, Err("Object does not exist".into()));
+        assert_eq!(car.query("X.Y.Z", "c", "UPSTREAM", 1).await.unwrap_err().message, "Object does not exist");
         assert_eq!(car.status().state, "ready", "an error reply leaves the script running");
 
         assert_eq!(car.stop().await.state, "off");
@@ -598,7 +664,7 @@ done
         let started = Instant::now();
         let error = car.query("X.Y.Z", "c", "UPSTREAM", 1).await.unwrap_err();
         assert!(started.elapsed() >= Duration::from_millis(1400), "{:?}", started.elapsed());
-        assert!(error.starts_with("Snowflake did not answer within 1 s"), "{error}");
+        assert!(error.message.starts_with("Snowflake did not answer within 1 s"), "{error}");
         let status = car.status();
         assert_eq!((status.state, status.python.as_str()), ("failed", "/bin/sh"));
         assert!(gone(&dir));
@@ -620,7 +686,7 @@ done
         let started = Instant::now();
         assert_eq!(car.stop().await.state, "off");
         let answer = tokio::time::timeout(Duration::from_secs(5), asking).await.expect("the request must return").unwrap();
-        assert_eq!(answer, Err("Snowflake lineage was switched off".into()));
+        assert_eq!(answer.unwrap_err().message, "Snowflake lineage was switched off");
         assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
         assert!(gone(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -644,6 +710,59 @@ done
         let car = Sidecar::new(false, quick());
         assert_eq!(car.start(&sh(), &script, &dir).await.state, "off");
         assert!(gone(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_profile_is_named_before_ready_and_outlives_the_script() {
+        let body = format!(
+            r#"echo '{{"event":"profiles","path":"/tmp/named/profiles.yml"}}'
+{READY}asked=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"op":"quit"'*) exit 0 ;;
+  esac
+  asked=$((asked + 1))
+  if [ "$asked" = 1 ]; then
+    echo '{{"id":1,"error":"251005: User is empty","phase":"connect"}}'
+  else
+    echo '{{"id":2,"error":"Object does not exist","phase":"query"}}'
+  fi
+done
+"#
+        );
+        let (dir, script) = fake("named", &body);
+        let car = Sidecar::new(true, quick());
+
+        let status = car.start(&sh(), &script, &dir).await;
+        assert_eq!((status.state, status.profiles.as_str()), ("ready", "/tmp/named/profiles.yml"));
+
+        // The phase is what says whether the profile is to blame.
+        let refused = car.query("X.Y.Z", "c", "UPSTREAM", 1).await.unwrap_err();
+        assert_eq!((refused.message.as_str(), refused.phase.as_str()), ("251005: User is empty", "connect"));
+        let rejected = car.query("X.Y.Z", "c", "UPSTREAM", 1).await.unwrap_err();
+        assert_eq!(rejected.phase, "query");
+
+        // Switched off, the file stays reachable: off is when it gets corrected.
+        assert_eq!(car.stop().await.profiles, "/tmp/named/profiles.yml");
+        assert_eq!(car.profile_path(), Some(PathBuf::from("/tmp/named/profiles.yml")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_restart_repeats_the_last_start() {
+        let (dir, script) = fake("restart", &format!("{READY}while IFS= read -r line; do :; done\n"));
+        let car = Sidecar::new(true, quick());
+        assert_eq!(car.start(&sh(), &script, &dir).await.state, "ready");
+        let first = std::fs::read_to_string(dir.join("pid")).unwrap();
+
+        // A root that holds nothing: working the interpreter out again would
+        // fail, so a ready script proves the recorded start was repeated.
+        let status = car.restart(Path::new("/nonexistent"), &VenvInfo::default()).await;
+        assert_eq!(status.state, "ready", "{status:?}");
+        assert_ne!(std::fs::read_to_string(dir.join("pid")).unwrap(), first, "a restart starts another process");
+
+        car.stop().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

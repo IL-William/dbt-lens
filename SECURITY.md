@@ -16,7 +16,10 @@ the editor reads and writes their files.
   another origin and refuses framing, so the terminal cannot be put under an
   invisible overlay on someone else's page.
 - **Every file path is confined to the opened project.** `..`, absolute paths,
-  drive letters and symlinks pointing out are refused.
+  drive letters and symlinks pointing out are refused. One file outside it is
+  reachable: the dbt profile the Snowflake script reads, which that script
+  names itself, and which only its own route serves. No path for it ever comes
+  from the browser.
 - **The editor reads the whole project, `.env` included.** That is what an
   editor is for. The environments panel, by contrast, never returns a `.env`
   value, only names and counts.

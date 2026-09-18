@@ -44,13 +44,19 @@ PROFILE_KEYS = (
 
 # --------------------------------------------------------------- profile ----
 def profiles_path(profiles_dir: str | None) -> Path:
-    """Where dbt itself looks: the flag, DBT_PROFILES_DIR, the project, ~/.dbt."""
+    """Where dbt itself looks: the flag, DBT_PROFILES_DIR, the project, ~/.dbt.
+
+    Always absolute: dbt-lens is told this path and has to open that file, not
+    something relative to wherever it happens to be running.
+    """
     explicit = profiles_dir or os.environ.get("DBT_PROFILES_DIR")
     if explicit:
-        return Path(explicit) / "profiles.yml"
-    if Path("profiles.yml").exists():
-        return Path("profiles.yml")
-    return Path.home() / ".dbt" / "profiles.yml"
+        found = Path(explicit) / "profiles.yml"
+    elif Path("profiles.yml").exists():
+        found = Path("profiles.yml")
+    else:
+        found = Path.home() / ".dbt" / "profiles.yml"
+    return found.resolve()
 
 
 def load_profile(profile: str, target: str | None, profiles_dir: str | None):
@@ -299,24 +305,32 @@ def cmd_serve(args):
 
     Requests: {"id": 1, "relation": "DB.SCHEMA.OBJECT", "column": "C",
                "direction": "UPSTREAM", "depth": 2}, or {"op": "quit"}.
-    Replies:  {"event": "ready", ...} once, then {"id": 1, "rows": [...]}
-              or {"id": 1, "error": "..."}.
+    Replies:  {"event": "profiles", "path": ...} and {"event": "ready", ...}
+              once each, then {"id": 1, "rows": [...]} or
+              {"id": 1, "error": "...", "phase": "connect" | "query"}.
+
+    The phase says whether the profile is to blame or not: a connection that
+    Snowflake refuses points at profiles.yml, a query that fails does not.
 
     Rows name Snowflake objects, not dbt nodes: dbt-lens maps them itself,
     because it knows the current manifest and the environment the user picked.
     The connection opens on the first request, never before, so a sign-in tab
     can only follow a click.
     """
-    kwargs, target = load_profile(args.profile, args.target, args.profiles_dir)
-    # Everything that needs no network fails here, before ready, rather than on
-    # the first click.
-    connector()
     out = sys.stdout
     conn = None
 
     def reply(obj):
         out.write(json.dumps(obj, separators=(",", ":")) + "\n")
         out.flush()
+
+    # Named before it is read, so dbt-lens can point at the file even when
+    # reading it is what fails.
+    reply({"event": "profiles", "path": str(profiles_path(args.profiles_dir))})
+    kwargs, target = load_profile(args.profile, args.target, args.profiles_dir)
+    # Everything that needs no network fails here, before ready, rather than on
+    # the first click.
+    connector()
 
     reply(
         {
@@ -341,13 +355,16 @@ def cmd_serve(args):
         if req.get("op") == "quit":
             break
         rid = req.get("id")
+        phase = "request"
         try:
             relation, column, direction, depth = lineage_request(req)
             # Whatever the connector prints mid-session, a renewed sign-in
             # included, must not land between two replies.
             with contextlib.redirect_stdout(sys.stderr):
                 if conn is None:
+                    phase = "connect"
                     conn = connect(kwargs)
+                phase = "query"
                 cur = conn.cursor()
                 try:
                     rows = column_lineage(cur, relation, column, direction, depth)
@@ -355,7 +372,7 @@ def cmd_serve(args):
                     cur.close()
             reply({"id": rid, "rows": rows_to_raw(rows)})
         except Exception as e:  # noqa: BLE001 - every failure becomes a reply
-            reply({"id": rid, "error": first_line(e, 300)})
+            reply({"id": rid, "error": first_line(e, 300), "phase": phase})
             # A dead session would fail every later request the same way.
             if conn is not None and getattr(conn, "is_closed", lambda: False)():
                 conn = None

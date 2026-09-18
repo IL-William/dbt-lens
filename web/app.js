@@ -32,15 +32,25 @@ const S = {
 };
 
 // ------------------------------------------------------------------ util --
+/* A route that can fail in several ways answers with JSON, and its fields end
+   up on the Error: the message stays readable either way. */
+function apiError(text, fallback) {
+  try {
+    const body = JSON.parse(text);
+    if (body && body.error) return Object.assign(new Error(body.error), body);
+  } catch { /* a plain sentence, which is the usual case */ }
+  return new Error(text || fallback);
+}
+
 const api = {
   async get(path) {
     const r = await fetch(path);
-    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    if (!r.ok) throw apiError(await r.text(), r.statusText);
     return r.json();
   },
   async send(path, method, body) {
     const r = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    if (!r.ok) throw apiError(await r.text(), r.statusText);
     return r.json();
   },
 };
@@ -335,6 +345,7 @@ function initEditor() {
 }
 
 const base = (path) => path.split('/').pop();
+const fileName = (path) => path.split(/[\\/]/).pop();
 const dirOf = (path) => {
   const d = path.slice(0, path.lastIndexOf('/'));
   return d.length > 36 ? '\u2026' + d.slice(-35) : d;
@@ -530,8 +541,10 @@ function activate(path, focusLineage = true) {
   }
   renderTabs();
   updateStatus();
-  markTreeSelection(f.kind === 'diff' ? f.path : path);
-  if (focusLineage) syncNode(f.kind === 'diff' ? f.path : path);
+  // A profile is not in the project, so no tree row and no node answer to it.
+  const inProject = f.kind === 'profile' ? '' : f.kind === 'diff' ? f.path : path;
+  markTreeSelection(inProject);
+  if (focusLineage && inProject) syncNode(inProject);
 }
 
 function closeFile(path) {
@@ -558,6 +571,7 @@ async function saveFile(path) {
   const f = S.open.get(path);
   if (f && f.kind === 'diff') return true;
   if (!f || !f.dirty) return true;
+  if (f.kind === 'profile') return saveProfile(path, f);
   try {
     await api.send('/api/file', 'PUT', { path, content: f.doc.getValue() });
     f.dirty = false;
@@ -572,6 +586,8 @@ async function save() {
   if (!S.active) return;
   const ok = await saveFile(S.active);
   renderTabs();
+  // The status bar carries the modified marker too, and it was keeping it.
+  updateStatus();
   refreshGit();
   if (ok) toast('saved ' + base(S.active), 'ok');
 }
@@ -582,6 +598,7 @@ async function saveAll() {
   let done = 0;
   for (const path of dirty) if (await saveFile(path)) done++;
   renderTabs();
+  updateStatus();
   refreshGit();
   toast(`saved ${done} of ${dirty.length} file${dirty.length > 1 ? 's' : ''}`, done === dirty.length ? 'ok' : 'err');
 }
@@ -609,8 +626,10 @@ function renderTabs() {
     const t = document.createElement('div');
     t.className = 'ftab' + (path === S.active ? ' active' : '') + (f.dirty ? ' dirty' : '');
     const name = document.createElement('span');
-    name.textContent = f.kind === 'diff' ? base(f.path) + '  ↔' : base(path);
-    name.title = f.kind === 'diff' ? f.path + '  (HEAD against the working tree)' : path;
+    name.textContent = f.kind === 'diff' ? base(f.path) + '  ↔' : f.kind === 'profile' ? fileName(f.path) : base(path);
+    name.title = f.kind === 'diff' ? f.path + '  (HEAD against the working tree)'
+      : f.kind === 'profile' ? f.path + '  (the dbt profile, outside the project)'
+      : path;
     const x = document.createElement('span');
     x.className = 'x';
     if (!f.dirty) x.textContent = '×';
@@ -684,6 +703,11 @@ function updateStatus() {
   const f = S.open.get(S.active);
   if (f.kind === 'diff') {
     s.textContent = `${f.path}  ·  diff against HEAD  ·  read only`;
+    return;
+  }
+  if (f.kind === 'profile') {
+    const at = S.cm.getCursor();
+    s.textContent = `${f.path}  ·  ${at.line + 1}:${at.ch + 1}${f.dirty ? '  ·  modified' : ''}  ·  outside the project`;
     return;
   }
   const c = S.cm.getCursor();
@@ -1395,6 +1419,63 @@ async function setSidecar(enabled) {
 /* A column clicked in the Catalog, or double-clicked on the canvas. With the
    switch on, its lineage is fetched from Snowflake before it is drawn; off, the
    cache is drawn as it is. */
+/* What a failed fetch should say. Only a connection Snowflake refused points at
+   the profile: a query it rejected is about the object or the role, and a
+   request this build got wrong is neither. */
+function connectionAdvice(error, phase, profiles) {
+  if (phase !== 'connect') return { text: `Snowflake: ${error}` };
+  const text = `Snowflake refused the connection: ${error}`;
+  return profiles ? { text, ask: 'check the user and account in', file: profiles } : { text };
+}
+
+/* The profile as a link. It is the file the script named, so there is nothing
+   to open before the script has run once. */
+function profileLink() {
+  const path = (S.sidecar && S.sidecar.profiles) || '';
+  if (!path) return null;
+  const a = document.createElement('a');
+  a.className = 'filelink';
+  a.textContent = fileName(path);
+  a.title = `${path}\nThe dbt profile the Snowflake script reads. Click to open it here.`;
+  a.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openProfiles(); });
+  return a;
+}
+
+/* The profile lives outside the project, so it has its own route rather than a
+   hole in the one that is confined to the project (0017). */
+async function openProfiles() {
+  const path = (S.sidecar && S.sidecar.profiles) || '';
+  if (!path) return toast('no profile yet: switch Snowflake lineage on once', 'err');
+  const key = 'profile:' + path;
+  if (!S.open.has(key)) {
+    let body;
+    try { body = await api.get('/api/profiles'); }
+    catch (e) { return toast('profile: ' + e.message, 'err'); }
+    S.open.set(key, { kind: 'profile', path: body.path, doc: CodeMirror.Doc(body.content, 'text/x-yaml'), dirty: false });
+    S.order.push(key);
+  }
+  activate(key, false);
+}
+
+/* The script reads the profile once, when it starts, so a correction that does
+   not restart it changes nothing. The server restarts it and says so. */
+async function saveProfile(key, f) {
+  try {
+    const saved = await api.send('/api/profiles', 'PUT', { content: f.doc.getValue() });
+    f.dirty = false;
+    await loadSidecar();
+    paintSidecarSwitch();
+    if (S.node) renderCatalog(S.node);
+    // The caller already says it saved; this is the part it cannot know.
+    if (saved.restarted) toast('Snowflake script restarted on the new profile', 'ok');
+    if (S.sidecar && S.sidecar.state === 'failed') toast('Snowflake lineage: ' + S.sidecar.error, 'err');
+    return true;
+  } catch (e) {
+    toast(`save failed for ${fileName(key)}: ${e.message}`, 'err');
+    return false;
+  }
+}
+
 async function openColumn(n, column) {
   if (!sidecarOn()) return focusColumn(n.id, column);
   const rel = lineageRelation(n, S.env);
@@ -1434,7 +1515,10 @@ async function openColumn(n, column) {
     status.title = res.unmatched.length ? 'Not nodes of this project:\n' + res.unmatched.join('\n') : '';
   } catch (e) {
     if (ask !== S.colAsk) return;
-    status.textContent = `Snowflake: ${e.message}`;
+    const advice = connectionAdvice(e.message, e.phase, (S.sidecar && S.sidecar.profiles) || '');
+    status.textContent = advice.ask ? `${advice.text}  ·  ${advice.ask} ` : advice.text;
+    const link = advice.file ? profileLink() : null;
+    if (link) status.appendChild(link);
     toast('Snowflake lineage: ' + e.message, 'err');
   } finally {
     await loadSidecar();
@@ -2344,6 +2428,8 @@ function catalogColumns(body, n) {
     if (hint.tone === 'failed') span.title = ((S.sidecar && S.sidecar.log) || []).join('\n');
     tools.appendChild(span);
   }
+  const link = profileLink();
+  if (link) tools.append(document.createTextNode('  ·  '), link);
   tools.append(Object.assign(document.createElement('div'), { className: 'grow' }));
   tools.appendChild(document.createTextNode('Sort by'));
   for (const [key, label] of [['az', 'A-Z'], ['tests', 'Tests']]) {

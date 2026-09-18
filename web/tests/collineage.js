@@ -4,6 +4,7 @@ var app = read('web/app.js');
 eval(app.slice(app.indexOf('function splitColId'), app.indexOf('/* Column-level lineage')));
 
 eval(app.slice(app.indexOf('function sidecarLabel'), app.indexOf('function sidecarSwitch')));
+eval(app.slice(app.indexOf('function connectionAdvice'), app.indexOf('function profileLink')));
 
 var lin = read('web/lineage.js');
 eval(lin.slice(lin.indexOf('function subtitle(n)'), lin.indexOf('  function init(')));
@@ -74,3 +75,18 @@ check('a failed script shows its own message, not a tooltip',
 check('a failed script with no message still says something',
       columnsHint({ enabled: true, state: 'failed', error: '' }, false).text, 'the Snowflake script could not start');
 check('waiting on Snowflake says so', columnsHint({ enabled: true, state: 'busy' }, true).tone, 'busy');
+
+print('\n--- what a failed click says ---');
+var refused = connectionAdvice('251005: User is empty, but it must be provided', 'connect', '/Users/me/.dbt/profiles.yml');
+check('a refused connection quotes Snowflake and points at the profile',
+      refused.text + ' | ' + refused.ask + ' | ' + refused.file,
+      'Snowflake refused the connection: 251005: User is empty, but it must be provided'
+      + ' | check the user and account in | /Users/me/.dbt/profiles.yml');
+check('a refused connection with no profile known says nothing about a file',
+      connectionAdvice('could not connect', 'connect', '').file, undefined);
+check('a query Snowflake rejected is not the profile\'s fault',
+      connectionAdvice('Object does not exist', 'query', '/Users/me/.dbt/profiles.yml').file, undefined);
+check('...and reads as itself', connectionAdvice('Object does not exist', 'query', '').text,
+      'Snowflake: Object does not exist');
+check('a request this build got wrong points nowhere',
+      connectionAdvice('depth must be a whole number', 'request', '/Users/me/.dbt/profiles.yml').file, undefined);

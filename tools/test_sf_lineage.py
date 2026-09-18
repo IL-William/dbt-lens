@@ -112,10 +112,13 @@ class ScriptTest(unittest.TestCase):
 
     def fake_connector(self):
         self.connections = []
+        self.refuse_connection = None
         module = types.ModuleType("snowflake.connector")
 
         def connect(**kwargs):
             print("Initiating login request with your identity provider. A browser window should have opened.")
+            if self.refuse_connection:
+                raise RuntimeError(self.refuse_connection)
             conn = FakeConnection()
             self.connections.append((kwargs, conn))
             return conn
@@ -148,6 +151,12 @@ class ScriptTest(unittest.TestCase):
                 self.fail(f"stdout carries a line that is not JSON: {line!r}")
         return parsed
 
+    def events(self, lines):
+        return [r["event"] for r in self.replies(lines) if "event" in r]
+
+    def answers(self, lines):
+        return [r for r in self.replies(lines) if "id" in r]
+
 
 class Serve(ScriptTest):
     def test_replies_stay_json_lines_when_sign_on_prints(self):
@@ -156,7 +165,9 @@ class Serve(ScriptTest):
             {"op": "quit"},
         )
         self.assertEqual(code, 0)
-        ready, answer = self.replies(lines)
+        named, ready = [r for r in self.replies(lines) if "event" in r]
+        answer = self.answers(lines)[0]
+        self.assertEqual(named, {"event": "profiles", "path": str((self.project / "profiles.yml").resolve())})
         self.assertEqual(
             ready,
             {"event": "ready", "profile": "shop", "target": "dev", "role": "transformer", "authenticator": "externalbrowser"},
@@ -183,14 +194,14 @@ class Serve(ScriptTest):
     def test_the_connection_waits_for_the_first_request(self):
         code, lines, _ = self.serve({"op": "quit"})
         self.assertEqual(code, 0)
-        self.assertEqual([r.get("event") for r in self.replies(lines)], ["ready"])
+        self.assertEqual(self.events(lines), ["profiles", "ready"])
         self.assertEqual(self.connections, [], "switching on must not open a connection")
 
     def test_one_connection_serves_every_request(self):
         ask = {"relation": "ANALYTICS.MARTS.DIM_CUSTOMERS", "column": "CUSTOMER_ID"}
         code, lines, _ = self.serve({"id": 1, **ask}, {"id": 2, **ask, "direction": "downstream"})
         self.assertEqual(code, 0)
-        self.assertEqual([r.get("id") for r in self.replies(lines)[1:]], [1, 2])
+        self.assertEqual([r["id"] for r in self.answers(lines)], [1, 2])
         self.assertEqual(len(self.connections), 1)
         self.assertEqual([p[1] for p in self.connections[0][1].executed], ["UPSTREAM", "DOWNSTREAM"])
 
@@ -204,7 +215,7 @@ class Serve(ScriptTest):
             {"id": 5, "column": "CUSTOMER_ID"},
         )
         self.assertEqual(code, 0)
-        by_id = {r["id"]: r for r in self.replies(lines)[1:]}
+        by_id = {r["id"]: r for r in self.answers(lines)}
         self.assertIn("UPSTREAM or DOWNSTREAM", by_id[1]["error"])
         self.assertIn("rows", by_id[2])
         self.assertIn("rows", by_id[3])
@@ -218,21 +229,41 @@ class Serve(ScriptTest):
             {"id": 2, "relation": "ANALYTICS.MARTS.DIM_CUSTOMERS", "column": "CUSTOMER_ID"},
         )
         self.assertEqual(code, 0)
-        first, second = self.replies(lines)[1:]
-        self.assertEqual(first, {"id": 1, "error": "SQL compilation error:"})
+        first, second = self.answers(lines)
+        self.assertEqual(first, {"id": 1, "error": "SQL compilation error:", "phase": "query"})
         self.assertEqual(len(second["rows"]), 1)
 
     def test_noise_on_stdin_is_ignored(self):
         code, lines, _ = self.serve("not json", "[1, 2]", "", {"op": "quit"})
         self.assertEqual(code, 0)
-        self.assertEqual(len(self.replies(lines)), 1)
+        self.assertEqual(self.answers(lines), [])
+
+    def test_a_refused_connection_blames_the_profile_and_a_bad_query_does_not(self):
+        ask = {"relation": "ANALYTICS.MARTS.DIM_CUSTOMERS", "column": "CUSTOMER_ID"}
+        self.refuse_connection = "251005: User is empty, but it must be provided"
+        code, lines, _ = self.serve({"id": 1, **ask}, {"id": 2, **ask, "direction": "SIDEWAYS"})
+        self.assertEqual(code, 0)
+        by_id = {r["id"]: r for r in self.answers(lines)}
+        self.assertEqual(by_id[1]["phase"], "connect")
+        self.assertTrue(by_id[1]["error"].startswith("251005"))
+        # A request this script refuses on its own is nobody's profile problem.
+        self.assertEqual(by_id[2]["phase"], "request")
+
+    def test_the_file_is_named_before_it_is_read(self):
+        elsewhere = self.home / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "profiles.yml").write_text(json.dumps(profiles()))
+        os.environ["DBT_PROFILES_DIR"] = str(elsewhere)
+        _, lines, _ = self.serve({"op": "quit"})
+        named = self.replies(lines)[0]
+        self.assertEqual(named, {"event": "profiles", "path": str((elsewhere / "profiles.yml").resolve())})
 
     def test_a_missing_connector_fails_before_ready(self):
         sys.modules["snowflake"] = None
         sys.modules["snowflake.connector"] = None
         code, lines, err = self.serve({"op": "quit"})
         self.assertEqual(code, 2)
-        self.assertEqual(lines, [], "ready must not be sent when no query could ever run")
+        self.assertEqual(self.events(lines), ["profiles"], "ready must not follow a setup that cannot work")
         self.assertIn("snowflake-connector-python is not installed", err)
 
 
@@ -244,7 +275,7 @@ class Profile(ScriptTest):
         self.write(self.project, profiles(user="{{ env_var('SHOP_SNOWFLAKE_USER') }}"))
         code, lines, err = self.serve({"op": "quit"})
         self.assertEqual(code, 2)
-        self.assertEqual(lines, [])
+        self.assertEqual(self.events(lines), ["profiles"], "the file is named even when reading it fails")
         self.assertIn("user of target 'dev'", err)
         self.assertNotIn("SHOP_SNOWFLAKE_USER", err)
 

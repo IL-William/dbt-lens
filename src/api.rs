@@ -105,6 +105,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/collineage", get(col_lineage))
         .route("/api/collineage/fetch", post(fetch_col_lineage))
         .route("/api/sidecar", get(sidecar_status).post(sidecar_switch))
+        .route("/api/profiles", get(read_profile).put(write_profile))
         .route("/api/dir", get(dir))
         .route("/api/files", get(file_search))
         .route("/api/file", get(read_file).put(write_file))
@@ -756,6 +757,81 @@ async fn sidecar_switch(State(st): State<Arc<AppState>>, Json(b): Json<SwitchBod
     Json(SidecarBody { enabled: st.sidecar.enabled(), status }).into_response()
 }
 
+/// A dbt profile is a few kilobytes; anything of this size is not one.
+const MAX_PROFILE_BYTES: u64 = 512 * 1024;
+
+#[derive(serde::Serialize)]
+struct ProfileBody {
+    path: String,
+    content: String,
+}
+
+fn profile_on_disk(path: &Path) -> Result<ProfileBody, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if meta.len() > MAX_PROFILE_BYTES {
+        return Err(format!("{} is far larger than a dbt profile, so it is left alone", path.display()));
+    }
+    let content = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    Ok(ProfileBody { path: path.display().to_string(), content })
+}
+
+/// Why there is nothing to open yet.
+const NO_PROFILE: &str = "no profile yet: switch Snowflake lineage on once, so the script says which file it reads";
+
+/// The dbt profile the Snowflake script read: the one file outside the project
+/// dbt-lens opens, and only because the script named it first (0017). No path
+/// comes from the browser, so no request can widen the exception.
+async fn read_profile(State(st): State<Arc<AppState>>) -> Response {
+    let Some(path) = st.sidecar.profile_path() else {
+        return (StatusCode::CONFLICT, NO_PROFILE).into_response();
+    };
+    match tokio::task::spawn_blocking(move || profile_on_disk(&path)).await {
+        Ok(Ok(body)) => Json(body).into_response(),
+        Ok(Err(e)) => (StatusCode::NOT_FOUND, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ProfileWrite {
+    content: String,
+}
+
+#[derive(serde::Serialize)]
+struct ProfileSaved {
+    path: String,
+    /// The script reads the profile once, when it starts, so saving restarts it.
+    restarted: bool,
+    #[serde(flatten)]
+    status: sidecar::Status,
+}
+
+/// Saves that same file, and only if it is already there: this route never
+/// creates a file, and never takes a path (0017). The write is atomic, so a
+/// half-written profile cannot be left behind.
+async fn write_profile(State(st): State<Arc<AppState>>, Json(b): Json<ProfileWrite>) -> Response {
+    let Some(path) = st.sidecar.profile_path() else {
+        return (StatusCode::CONFLICT, NO_PROFILE).into_response();
+    };
+    if b.content.len() as u64 > MAX_PROFILE_BYTES {
+        return (StatusCode::BAD_REQUEST, "far larger than a dbt profile, so it is not written").into_response();
+    }
+    if !path.is_file() {
+        return (StatusCode::NOT_FOUND, format!("{} is no longer there", path.display())).into_response();
+    }
+    let (target, content) = (path.clone(), b.content);
+    match tokio::task::spawn_blocking(move || crate::settings::write_atomic(&target, content.as_bytes())).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("cannot write {}: {e}", path.display())).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+    // A correction nobody reads is worse than no correction: the script holds
+    // the profile it read at startup, so it starts again on the new one.
+    let restarted = st.sidecar.enabled();
+    let status = if restarted { st.sidecar.restart(&st.root, &st.venv).await } else { st.sidecar.status() };
+    Json(ProfileSaved { path: path.display().to_string(), restarted, status }).into_response()
+}
+
 #[derive(Deserialize)]
 struct FetchBody {
     id: String,
@@ -770,6 +846,15 @@ struct FetchBody {
     up: u32,
     #[serde(default = "two")]
     down: u32,
+}
+
+/// A fetch that failed, with the phase that says whether the profile is to
+/// blame, so the UI can point at it without reading Snowflake's error codes.
+#[derive(serde::Serialize)]
+struct FetchFailed {
+    error: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    phase: String,
 }
 
 #[derive(serde::Serialize)]
@@ -842,7 +927,10 @@ async fn fetch_col_lineage(State(st): State<Arc<AppState>>, Json(b): Json<FetchB
         // GET_LINEAGE goes five levels deep at most.
         match st.sidecar.query(&b.relation, &b.column, direction, depth.min(5)).await {
             Ok(found) => rows.extend(found),
-            Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
+            Err(e) => {
+                let body = FetchFailed { error: e.message, phase: e.phase };
+                return (StatusCode::BAD_GATEWAY, Json(body)).into_response();
+            }
         }
     }
 
@@ -1270,11 +1358,11 @@ mod tests {
 
     /// A real server on a free port, so the guard is exercised the way a
     /// browser reaches it: raw HTTP over TCP, no client library.
-    async fn serve(root: &Path) -> (u16, tokio::task::JoinHandle<()>) {
+    async fn serve(root: &Path) -> (u16, Arc<AppState>, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let manifest = root.join("target").join("manifest.json");
-        let state = Arc::new(AppState {
+        let state: Arc<AppState> = Arc::new(AppState {
             port,
             root: root.to_path_buf(),
             manifest_path: manifest.clone(),
@@ -1291,10 +1379,11 @@ mod tests {
             cll_lock: tokio::sync::Mutex::new(()),
             seen: std::sync::Mutex::new([0; 3]),
         });
+        let held = state.clone();
         let task = tokio::spawn(async move {
             axum::serve(listener, router(state)).await.unwrap();
         });
-        (port, task)
+        (port, held, task)
     }
 
     /// Sends one raw request and returns the status line.
@@ -1326,6 +1415,15 @@ mod tests {
         text.split("\r\n\r\n").next().unwrap_or("").to_string()
     }
 
+    /// The whole response, head and body, for a route whose answer matters.
+    async fn body_of(port: u16, request: String) -> String {
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        s.write_all(request.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), s.read_to_end(&mut buf)).await;
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
     fn get(path: &str, headers: &[(&str, &str)]) -> String {
         raw("GET", path, headers)
     }
@@ -1342,7 +1440,7 @@ mod tests {
     #[tokio::test]
     async fn the_guard_refuses_other_pages_and_other_hosts() {
         let root = temp_project("guard");
-        let (port, server) = serve(&root).await;
+        let (port, _st, server) = serve(&root).await;
         let host = format!("127.0.0.1:{port}");
         let own = format!("http://127.0.0.1:{port}");
 
@@ -1399,7 +1497,7 @@ mod tests {
     #[tokio::test]
     async fn snowflake_lineage_answers_only_this_page_and_only_when_switched_on() {
         let root = temp_project("snowflake");
-        let (port, server) = serve(&root).await;
+        let (port, _st, server) = serve(&root).await;
         let host = format!("127.0.0.1:{port}");
         let own = format!("http://127.0.0.1:{port}");
         let fetch = r#"{"id":"model.shop.dim_customers","column":"customer_id","relation":"analytics.marts.dim_customers"}"#;
@@ -1419,10 +1517,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The one file outside the project dbt-lens opens, and only because the
+    /// script named it: the route itself takes no path at all (0017).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_profile_is_read_and_written_where_the_script_said() {
+        let root = temp_project("profile");
+        let (port, st, server) = serve(&root).await;
+        let host = format!("127.0.0.1:{port}");
+        let own = format!("http://127.0.0.1:{port}");
+        let put = |body: &str| with_json("PUT", "/api/profiles", &[("Host", &host), ("Origin", &own)], body);
+
+        // Nothing has named a profile yet, so there is nothing to open.
+        assert!(status_of(port, get("/api/profiles", &[("Host", &host)])).await.ends_with("409 Conflict"));
+        assert!(status_of(port, put(r#"{"content":"x"}"#)).await.ends_with("409 Conflict"));
+        // And no other page may write it.
+        let foreign = with_json("PUT", "/api/profiles", &[("Host", &host), ("Origin", "https://evil.example")], r#"{"content":"x"}"#);
+        assert!(status_of(port, foreign).await.ends_with("403 Forbidden"));
+
+        // A script that names a profile, outside the project on purpose.
+        let outside = std::env::temp_dir().join(format!("dbt-lens-profile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        let profile = outside.join("profiles.yml");
+        std::fs::write(&profile, "shop:\n  target: dev\n").unwrap();
+        let script = outside.join("fake.sh");
+        let announce = format!(
+            "echo '{{\"event\":\"profiles\",\"path\":\"{}\"}}'\necho '{{\"event\":\"ready\"}}'\nwhile IFS= read -r line; do :; done\n",
+            profile.display(),
+        );
+        std::fs::write(&script, announce).unwrap();
+        let sh = [crate::sidecar::Interpreter { program: "/bin/sh".into(), args: Vec::new() }];
+        st.sidecar.set_enabled(true);
+        assert_eq!(st.sidecar.start(&sh, &script, &outside).await.state, "ready");
+
+        let answer = body_of(port, get("/api/profiles", &[("Host", &host)])).await;
+        assert!(answer.contains("target: dev"), "{answer}");
+        assert!(answer.contains(&profile.display().to_string()), "{answer}");
+
+        let saved = body_of(port, put(r#"{"content":"shop:\n  target: prod\n"}"#)).await;
+        assert!(saved.contains("\"restarted\":true"), "{saved}");
+        assert_eq!(std::fs::read_to_string(&profile).unwrap(), "shop:\n  target: prod\n");
+
+        st.sidecar.stop().await;
+        server.abort();
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn every_reply_carries_the_security_headers() {
         let root = temp_project("headers");
-        let (port, server) = serve(&root).await;
+        let (port, _st, server) = serve(&root).await;
         let host = format!("127.0.0.1:{port}");
         for path in ["/", "/api/meta"] {
             let head = head_of(port, get(path, &[("Host", &host)])).await.to_lowercase();
@@ -1442,7 +1588,7 @@ mod tests {
     #[tokio::test]
     async fn a_diff_path_cannot_leave_the_project() {
         let root = temp_project("diff");
-        let (port, server) = serve(&root).await;
+        let (port, _st, server) = serve(&root).await;
         let host = format!("127.0.0.1:{port}");
         for p in ["..%5C..%5Cx", "../x", "C:/x", "C:%5Cx"] {
             let line = status_of(port, get(&format!("/api/git/diff?path={p}"), &[("Host", &host)])).await;

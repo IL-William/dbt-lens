@@ -47,6 +47,8 @@ frontend fix does not exist in a release binary until it is rebuilt (see 0005).
   Snowflake lineage on, under their own credentials (0002, 0016).
 - **Never return or log a `.env` value.** Resolved locations and `DBT_TARGET`
   are the only things derived from them that leave the server (0012).
+- **Nothing outside the project is read or written**, except the one dbt profile
+  the Snowflake script names, through its own route (0017).
 - **Treat this repository as public.** Fixtures and examples are invented, never
   taken from a real project (0014).
 - **The browser is not trusted.** Every route sits behind the Host and Origin
@@ -75,14 +77,14 @@ frontend fix does not exist in a release binary until it is rebuilt (see 0005).
 | touch `src/envs.rs`, or evaluate Jinja | [0009](docs/decisions/0009-env-resolution-by-scanner.md) |
 | change the location table or the environment selector | [0010](docs/decisions/0010-moved-compares-parsed-with-built.md) |
 | persist anything, or add a write endpoint | [0011](docs/decisions/0011-settings-outside-the-project.md) |
-| add a field to a payload, a log line or a route | [0012](docs/decisions/0012-secrets-and-boundaries.md) |
+| add a field to a payload, a log line or a route | [0012](docs/decisions/0012-secrets-and-boundaries.md), [0017](docs/decisions/0017-the-profile-is-reachable.md) |
 | rename a function in `web/app.js`, or add a test | [0013](docs/decisions/0013-tests-without-a-toolchain.md) |
 | add a route, change the port logic, or add a CORS header | [0015](docs/decisions/0015-the-browser-is-not-trusted.md) |
 | start a process from the server, or touch `src/sidecar.rs` | [0016](docs/decisions/0016-column-lineage-on-demand.md) |
 | set this up for someone, rather than change it | [README, Getting started](README.md#getting-started) |
 | pick up the next piece of work | [docs/state.md](docs/state.md) |
 
-All sixteen decisions, with what was rejected each time, are indexed in
+All seventeen decisions, with what was rejected each time, are indexed in
 [docs/decisions/](docs/decisions/). The [README](README.md) is the user-facing
 documentation: what the tool does and how to use it. Rationale lives here, never
 in both.
