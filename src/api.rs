@@ -29,7 +29,9 @@ pub struct AppState {
     pub root: PathBuf,
     pub manifest_path: PathBuf,
     pub catalog_path: PathBuf,
-    pub cll_path: PathBuf,
+    /// The cache currently merged into the graph. Changeable, because the
+    /// project can hold one file per producer and the user picks which one.
+    pub cll_path: std::sync::RwLock<PathBuf>,
     /// Where dbt writes its artifacts; the compiled SQL lives under it.
     pub target_dir: PathBuf,
     pub venv: VenvInfo,
@@ -47,6 +49,19 @@ pub struct AppState {
     /// click records the cache it wrote, or the watcher would re-read the whole
     /// manifest for it three seconds later.
     pub seen: std::sync::Mutex<[u64; 3]>,
+}
+
+impl AppState {
+    /// The active cache path. Cloned rather than borrowed: the lock must not be
+    /// held across an await, and every caller wants an owned path anyway.
+    pub fn cll(&self) -> PathBuf {
+        self.cll_path.read().map(|p| p.clone()).unwrap_or_default()
+    }
+    pub fn set_cll(&self, path: PathBuf) {
+        if let Ok(mut slot) = self.cll_path.write() {
+            *slot = path;
+        }
+    }
 }
 
 #[derive(rust_embed::RustEmbed)]
@@ -104,6 +119,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/compiled", get(compiled_sql))
         .route("/api/lineage", get(lineage))
         .route("/api/collineage", get(col_lineage))
+        .route("/api/collineage/source", post(select_cll_source))
         .route("/api/collineage/fetch", post(fetch_col_lineage))
         .route("/api/sidecar", get(sidecar_status).post(sidecar_switch))
         .route("/api/profiles", get(read_profile).put(write_profile))
@@ -232,10 +248,22 @@ struct MetaBody {
     build: &'static str,
     venv: VenvInfo,
     meta: crate::graph::Meta,
+    /// Every cache found beside the manifest, so the UI can offer them without
+    /// a second round trip. Headers only: no edge array is parsed for this.
+    cll_sources: Vec<collin::Available>,
+    /// File name of the active one, matching one of `cll_sources`.
+    cll_active: String,
 }
 
 async fn meta(State(st): State<Arc<AppState>>) -> Response {
     let graph = st.graph.read().await.clone();
+    let dir = st.target_dir.clone();
+    let cll_sources = tokio::task::spawn_blocking(move || collin::discover(&dir)).await.unwrap_or_default();
+    let cll_active = st
+        .cll()
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     Json(MetaBody {
         root: st.root.display().to_string(),
         shell: format!("{} {}", st.shell.program, st.shell.args.join(" ")).trim().to_string(),
@@ -243,13 +271,57 @@ async fn meta(State(st): State<Arc<AppState>>) -> Response {
         build: env!("DBT_LENS_BUILD"),
         venv: st.venv.clone(),
         meta: graph.meta.clone(),
+        cll_sources,
+        cll_active,
     })
     .into_response()
 }
 
+#[derive(Deserialize)]
+struct CllSourceBody {
+    /// A file name as `/api/meta` listed it, never a path.
+    file: String,
+}
+
+/// Switches which column-lineage cache the graph holds.
+///
+/// The graph can only carry one source at a time: `merge_col_lineage` replaces
+/// the edge set rather than adding to it, which is what keeps two producers'
+/// answers from being blended into something neither of them said.
+///
+/// The name is matched against what discovery found rather than joined onto the
+/// target directory, so nothing the browser sends can reach another file (0015).
+async fn select_cll_source(State(st): State<Arc<AppState>>, Json(b): Json<CllSourceBody>) -> Response {
+    let dir = st.target_dir.clone();
+    let wanted = b.file.clone();
+    let found = tokio::task::spawn_blocking(move || collin::discover(&dir)).await.unwrap_or_default();
+    let Some(chosen) = collin::resolve_choice(&found, &wanted) else {
+        return (StatusCode::NOT_FOUND, "no such column lineage cache beside the manifest").into_response();
+    };
+    let path = st.target_dir.join(&chosen.file);
+
+    let _cache = st.cll_lock.lock().await;
+    st.set_cll(path.clone());
+    let _ = st.settings.update(|s| s.cll_file = Some(wanted.clone())).await;
+
+    let (manifest, catalog) = (st.manifest_path.clone(), st.catalog_path.clone());
+    match tokio::task::spawn_blocking(move || load_graph(&manifest, &catalog, &path)).await {
+        Ok(Ok(g)) => {
+            let meta = g.meta.clone();
+            if let Ok(mut seen) = st.seen.lock() {
+                seen[2] = meta.cll_mtime;
+            }
+            *st.graph.write().await = Arc::new(g);
+            Json(meta).into_response()
+        }
+        Ok(Err(e)) => err(e),
+        Err(e) => err(e),
+    }
+}
+
 async fn reload(State(st): State<Arc<AppState>>) -> Response {
     let _cache = st.cll_lock.lock().await;
-    let (path, cat, cll) = (st.manifest_path.clone(), st.catalog_path.clone(), st.cll_path.clone());
+    let (path, cat, cll) = (st.manifest_path.clone(), st.catalog_path.clone(), st.cll());
     match tokio::task::spawn_blocking(move || load_graph(&path, &cat, &cll)).await {
         Ok(Ok(g)) => {
             let meta = g.meta.clone();
@@ -1073,9 +1145,10 @@ async fn fetch_col_lineage(State(st): State<Arc<AppState>>, Json(b): Json<FetchB
         if !graph.index.contains_key(&b.id) {
             return (StatusCode::NOT_FOUND, "unknown node").into_response();
         }
-        if graph.meta.cll_edges > 0 && graph.meta.cll_source != "snowflake" {
-            return (StatusCode::CONFLICT, collin::other_source(&st.cll_path, &graph.meta.cll_source)).into_response();
-        }
+        // No conflict check any more: Snowflake writes to its own file, so it
+        // cannot contend with another producer's. What it still does is take
+        // over the graph, which holds one source at a time, and the UI says so
+        // by showing which cache is active.
     }
     // The file's values stay on the server: they only decide which node an
     // object stands for.
@@ -1125,7 +1198,10 @@ async fn fetch_col_lineage(State(st): State<Arc<AppState>>, Json(b): Json<FetchB
     };
 
     let _cache = st.cll_lock.lock().await;
-    let (path, target) = (st.cll_path.clone(), st.sidecar.status().target);
+    // Its own file, always, whatever is currently loaded. One file per producer
+    // is what keeps a half Snowflake, half other cache from ever existing.
+    let path = collin::path_for(&st.target_dir, "snowflake");
+    let target = st.sidecar.status().target;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let merged = match tokio::task::spawn_blocking(move || collin::add_to_file(&path, edges, &target, now)).await {
         Ok(Ok(merged)) => merged,
@@ -1135,14 +1211,23 @@ async fn fetch_col_lineage(State(st): State<Arc<AppState>>, Json(b): Json<FetchB
     let mut added = 0;
     if let Some((cache, n)) = merged {
         added = n;
-        let mtime = mtime_secs(&st.cll_path);
+        // Fetching is an explicit request for Snowflake's answer, so its cache
+        // becomes the active one. The graph could not show both anyway.
+        let snow = collin::path_for(&st.target_dir, "snowflake");
+        if st.cll() != snow {
+            st.set_cll(snow.clone());
+            if let Some(name) = snow.file_name().map(|n| n.to_string_lossy().into_owned()) {
+                let _ = st.settings.update(|s| s.cll_file = Some(name)).await;
+            }
+        }
+        let mtime = mtime_secs(&st.cll());
         if let Ok(mut seen) = st.seen.lock() {
             seen[2] = mtime;
         }
         let mut current = st.graph.write().await;
         let graph = Arc::make_mut(&mut current);
         graph.merge_col_lineage(cache, mtime);
-        graph.meta.cll_file = st.cll_path.display().to_string();
+        graph.meta.cll_file = st.cll().display().to_string();
     }
     let graph = st.graph.read().await.clone();
     let (up, down) = match (graph.cll.as_ref(), graph.index.get(&b.id)) {
@@ -1489,7 +1574,7 @@ pub async fn watch_artifacts(st: Arc<AppState>) {
         // Held through the reload: a click merging fetched lineage meanwhile
         // would otherwise merge into the graph this reload is about to replace.
         let _cache = st.cll_lock.lock().await;
-        let (mp, cp, lp) = (st.manifest_path.clone(), st.catalog_path.clone(), st.cll_path.clone());
+        let (mp, cp, lp) = (st.manifest_path.clone(), st.catalog_path.clone(), st.cll());
         let stamps = tokio::task::spawn_blocking(move || [mtime_secs(&mp), mtime_secs(&cp), mtime_secs(&lp)])
             .await
             .unwrap_or([0, 0, 0]);
@@ -1505,7 +1590,7 @@ pub async fn watch_artifacts(st: Arc<AppState>) {
         }
         // Give dbt a moment to finish writing.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let (mp, cp, lp) = (st.manifest_path.clone(), st.catalog_path.clone(), st.cll_path.clone());
+        let (mp, cp, lp) = (st.manifest_path.clone(), st.catalog_path.clone(), st.cll());
         if let Ok(Ok(g)) = tokio::task::spawn_blocking(move || load_graph(&mp, &cp, &lp)).await {
             eprintln!("  artifacts reloaded ({} nodes, {} ms)", g.nodes.len(), g.meta.load_ms);
             *st.graph.write().await = Arc::new(g);
@@ -1576,7 +1661,7 @@ mod tests {
             root: root.to_path_buf(),
             manifest_path: manifest.clone(),
             catalog_path: root.join("target").join("catalog.json"),
-            cll_path: root.join("target").join("column_lineage.json"),
+            cll_path: std::sync::RwLock::new(root.join("target").join("column_lineage.json")),
             target_dir: root.join("target"),
             venv: VenvInfo::default(),
             file_index: RwLock::new(Arc::new(Vec::new())),

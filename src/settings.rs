@@ -37,6 +37,10 @@ pub struct Settings {
     /// Snowflake column lineage on click. Off unless the user turned it on (0016).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub snowflake_lineage: bool,
+    /// Which column-lineage cache to merge, by file name. A project can hold one
+    /// per producer, and the choice is the user's rather than the newest file's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cll_file: Option<String>,
 }
 
 fn looks_absolute(value: &str, windows: bool) -> bool {
