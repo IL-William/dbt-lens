@@ -100,6 +100,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/node", get(node))
         .route("/api/envs", get(list_envs).put(save_envs))
         .route("/api/envs/select", post(select_env))
+        .route("/api/vars", get(list_vars))
         .route("/api/compiled", get(compiled_sql))
         .route("/api/lineage", get(lineage))
         .route("/api/collineage", get(col_lineage))
@@ -223,6 +224,11 @@ fn err(e: impl std::fmt::Display) -> Response {
 struct MetaBody {
     root: String,
     shell: String,
+    /// The package version, and which build it is. A release binary embeds
+    /// `web/` (0005), so the page saying which build drew it is the quickest
+    /// answer to "my frontend fix did nothing".
+    version: &'static str,
+    build: &'static str,
     venv: VenvInfo,
     meta: crate::graph::Meta,
 }
@@ -232,6 +238,8 @@ async fn meta(State(st): State<Arc<AppState>>) -> Response {
     Json(MetaBody {
         root: st.root.display().to_string(),
         shell: format!("{} {}", st.shell.program, st.shell.args.join(" ")).trim().to_string(),
+        version: env!("CARGO_PKG_VERSION"),
+        build: env!("DBT_LENS_BUILD"),
         venv: st.venv.clone(),
         meta: graph.meta.clone(),
     })
@@ -636,6 +644,174 @@ async fn select_env(State(st): State<Arc<AppState>>, Json(b): Json<SelectBody>) 
         Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
+}
+
+/// The project's vars, and any env vars the editor asked about by name.
+///
+/// This is the one route that returns a value derived from a `.env` file, which
+/// 0012 forbade and 0019 allows under two server-side guards: a
+/// `DBT_ENV_SECRET_*` is never substituted, and a name that reads as a
+/// credential comes back with its status and no value. Nothing here is logged.
+#[derive(Deserialize)]
+struct VarsQuery {
+    /// The `.env` file this tab has selected, "" for none.
+    #[serde(default)]
+    env: String,
+    /// Comma separated env var names, for the editor's `env_var()` hover.
+    /// One field rather than a repeated key: `serde_urlencoded` does not
+    /// collect repeated keys into a Vec.
+    #[serde(default)]
+    names: String,
+}
+
+/// At most this many names per request, so one crafted URL cannot walk a file.
+const MAX_VAR_NAMES: usize = 64;
+
+#[derive(serde::Serialize)]
+struct VarOut<'a> {
+    name: &'a str,
+    line: usize,
+    /// The value as written in dbt_project.yml.
+    raw: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    list: Option<&'a [String]>,
+    /// Present only for a Jinja value that was resolved, and never when redacted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<envs::Status>,
+    /// The env var names the expression reads. Names only, as everywhere else.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    vars: Vec<String>,
+    /// The value came from the default written in the `env_var()` call rather
+    /// than from the file, which the card has to be able to say.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    default_used: bool,
+    /// The name reads as a credential, so no value is returned (0019).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    redacted: bool,
+    /// Declared with no value, so var() returns null.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    null: bool,
+}
+
+#[derive(serde::Serialize)]
+struct EnvVarOut {
+    name: String,
+    status: envs::Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    redacted: bool,
+}
+
+#[derive(serde::Serialize)]
+struct VarsBody<'a> {
+    file: &'static str,
+    found: bool,
+    /// The `.env` the values were resolved with, "" for none.
+    env: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    vars: Vec<VarOut<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    env_vars: Vec<EnvVarOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    packages: Vec<&'a crate::project::PackageVars>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unparsed: Vec<&'a crate::project::Unparsed>,
+}
+
+async fn list_vars(State(st): State<Arc<AppState>>, Query(q): Query<VarsQuery>) -> Response {
+    if !q.env.is_empty() && !valid_env_file(&q.env) {
+        return (StatusCode::BAD_REQUEST, "not an env file name").into_response();
+    }
+    let names: Vec<String> =
+        q.names.split(',').map(str::trim).filter(|s| !s.is_empty()).take(MAX_VAR_NAMES).map(String::from).collect();
+
+    let root = st.root.clone();
+    let want_env = q.env.clone();
+    // The project file and the .env files are read fresh, so an edit to either
+    // shows up on the next hover rather than on the next restart.
+    let loaded = tokio::task::spawn_blocking(move || {
+        let project = crate::project::read(&root);
+        let vars = if want_env.is_empty() {
+            Some(envs::Vars::new())
+        } else {
+            envs::discover(&root).into_iter().find(|f| f.file == want_env).map(|f| f.vars)
+        };
+        (project, vars)
+    })
+    .await;
+    let Ok((project, found_vars)) = loaded else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not read the project").into_response();
+    };
+    let Some(vars) = found_vars else {
+        return (StatusCode::BAD_REQUEST, "unknown env file").into_response();
+    };
+
+    let mut out = Vec::new();
+    for v in &project.vars {
+        let mut row = VarOut {
+            name: &v.name,
+            line: v.line,
+            raw: &v.raw,
+            list: v.list.as_deref(),
+            resolved: None,
+            status: None,
+            vars: Vec::new(),
+            default_used: false,
+            redacted: envs::sensitive_name(&v.name),
+            null: v.null,
+        };
+        if v.jinja {
+            let (value, cell) = envs::resolve(&v.raw, "", &vars);
+            // Reading from the file and falling back to the default written in
+            // the call both end up as Env, and the card has to tell them apart.
+            row.default_used = envs::used_default(&cell, &vars);
+            row.redacted = row.redacted || cell.vars.iter().any(|n| envs::sensitive_name(n));
+            row.status = Some(cell.kind);
+            row.vars = cell.vars;
+            if !row.redacted {
+                row.resolved = Some(value);
+            }
+        } else if row.redacted {
+            // Committed to the repository rather than read from a .env, so 0012
+            // does not reach it. Handing over a credential because of where it
+            // happens to be written is still not a distinction worth defending.
+            row.raw = "";
+            row.list = None;
+        }
+        out.push(row);
+    }
+
+    let env_vars = names
+        .into_iter()
+        .map(|name| {
+            let (value, cell) = envs::lookup(&name, &vars);
+            let redacted = envs::sensitive_name(&name);
+            EnvVarOut {
+                name,
+                status: cell.kind,
+                value: if redacted || cell.kind != envs::Status::Env && cell.kind != envs::Status::Placeholder {
+                    None
+                } else {
+                    Some(value)
+                },
+                redacted,
+            }
+        })
+        .collect();
+
+    Json(VarsBody {
+        file: "dbt_project.yml",
+        found: project.found,
+        env: &q.env,
+        vars: out,
+        env_vars,
+        packages: project.packages.iter().collect(),
+        unparsed: project.unparsed.iter().collect(),
+    })
+    .into_response()
 }
 
 #[derive(Deserialize)]

@@ -161,6 +161,62 @@ impl Cell {
 
 const SECRET_PREFIX: &str = "DBT_ENV_SECRET_";
 
+/// dbt's own marker for a value that must never be rendered. The one guard that
+/// applies to every path out of this module (0012).
+fn is_secret(name: &str) -> bool {
+    name.starts_with(SECRET_PREFIX)
+}
+
+/// Names that read as a credential rather than as a location. Applied only by
+/// the vars route (0019), never by the location resolver: that one legitimately
+/// reads names like `DBT_DB_RAW`, and a broad rule there would blank real
+/// schema names and quietly wreck `agreement`.
+///
+/// Matched on underscore-delimited tokens, because `KEY` as a substring also
+/// catches `PARTITION_KEY`, `DBT_UNIQUE_KEY` and `MONKEY`.
+pub fn sensitive_name(name: &str) -> bool {
+    const ALWAYS: [&str; 10] = [
+        "PASSWORD", "PASSWD", "PWD", "PW", "SECRET", "TOKEN", "CREDENTIAL", "CREDENTIALS", "PRIVATE",
+        "PASSPHRASE",
+    ];
+    const BEFORE_KEY: [&str; 6] = ["API", "ACCESS", "PRIVATE", "SECRET", "ENCRYPTION", "SIGNING"];
+    let upper = name.to_ascii_uppercase();
+    let tokens: Vec<&str> = upper.split('_').filter(|t| !t.is_empty()).collect();
+    tokens.iter().enumerate().any(|(i, t)| {
+        ALWAYS.contains(t) || (*t == "KEY" && i > 0 && BEFORE_KEY.contains(&tokens[i - 1]))
+    })
+}
+
+/// Whether an expression's value came from the defaults written in its
+/// `env_var()` calls rather than from the file. `all`, not `any`: an expression
+/// reading two variables of which the file defines one is not "the default",
+/// and saying so would be a claim the payload cannot support.
+pub fn used_default(cell: &Cell, vars: &Vars) -> bool {
+    cell.kind == Status::Env && !cell.vars.is_empty() && cell.vars.iter().all(|n| !vars.contains_key(n))
+}
+
+/// One environment variable by name, for the editor's `env_var()` hover. Same
+/// secret guard as `substitute`, and the same vocabulary, so a caller cannot
+/// reach a value through this door that the other one refuses.
+pub fn lookup(name: &str, vars: &Vars) -> (String, Cell) {
+    let mut cell = Cell::new(Status::Literal);
+    cell.vars.push(name.to_string());
+    if is_secret(name) {
+        cell.kind = Status::Unevaluated;
+        return (String::new(), cell);
+    }
+    match vars.get(name) {
+        Some(v) => {
+            cell.kind = if is_placeholder(v) { Status::Placeholder } else { Status::Env };
+            (v.clone(), cell)
+        }
+        None => {
+            cell.kind = Status::Missing;
+            (String::new(), cell)
+        }
+    }
+}
+
 pub fn is_placeholder(value: &str) -> bool {
     let v = value.trim().to_ascii_lowercase();
     // `na` is left out on purpose: it is a plausible schema name.
@@ -228,7 +284,7 @@ fn substitute(expr: &str, vars: &Vars) -> (String, Cell) {
         rest = &rest[start + 2 + len + 2..];
 
         match env_var_call(inner) {
-            Some((name, _)) if name.starts_with(SECRET_PREFIX) => {
+            Some((name, _)) if is_secret(&name) => {
                 raise(&mut cell, Status::Unevaluated);
             }
             Some((name, default)) => {
@@ -690,6 +746,53 @@ mod tests {
     fn resolve_ignores_jinja_comments() {
         let (value, cell) = resolve("{# pick the mart #}{{ env_var('A') }}", "", &vars(&[("A", "DB")]));
         assert_eq!((value.as_str(), cell.kind), ("DB", Status::Env));
+    }
+
+    #[test]
+    fn used_default_is_all_not_any() {
+        let one = vars(&[("DBT_A", "from_file")]);
+        let (_, mixed) = resolve("{{ env_var('DBT_A') }}-{{ env_var('DBT_B', 'd') }}", "", &one);
+        assert!(!used_default(&mixed, &one), "one name came from the file, so this is not the default");
+        let (_, both) = resolve("{{ env_var('DBT_X', 'd') }}-{{ env_var('DBT_Y', 'e') }}", "", &vars(&[]));
+        assert!(used_default(&both, &vars(&[])));
+        let (_, from_file) = resolve("{{ env_var('DBT_A') }}", "", &one);
+        assert!(!used_default(&from_file, &one));
+    }
+
+    #[test]
+    fn lookup_never_returns_a_secret() {
+        let (value, cell) = lookup("DBT_ENV_SECRET_PASSWORD", &vars(&[("DBT_ENV_SECRET_PASSWORD", "hunter2")]));
+        assert_eq!((value.as_str(), cell.kind), ("", Status::Unevaluated));
+    }
+
+    #[test]
+    fn lookup_reports_a_missing_name_without_inventing_one() {
+        let (value, cell) = lookup("DBT_ABSENT", &vars(&[]));
+        assert_eq!((value.as_str(), cell.kind), ("", Status::Missing));
+        assert_eq!(cell.vars, ["DBT_ABSENT"]);
+    }
+
+    #[test]
+    fn lookup_flags_a_placeholder() {
+        let (_, cell) = lookup("DBT_DB", &vars(&[("DBT_DB", "TBD")]));
+        assert_eq!(cell.kind, Status::Placeholder);
+    }
+
+    #[test]
+    fn sensitive_name_catches_credentials() {
+        for name in ["SNOWFLAKE_PASSWORD", "DBT_API_KEY", "MY_TOKEN", "AZURE_CLIENT_SECRET",
+                     "svc_passwd", "DB_CREDENTIALS", "SSH_PRIVATE_KEY", "A_PASSPHRASE",
+                     "SF_PW", "DB_PWD"] {
+            assert!(sensitive_name(name), "{name} should be treated as sensitive");
+        }
+    }
+
+    #[test]
+    fn sensitive_name_leaves_ordinary_config_alone() {
+        for name in ["DBT_UNIQUE_KEY", "PARTITION_KEY", "SORT_KEY", "MERGE_KEY", "KEYSTONE_SCHEMA",
+                     "MONKEY", "DBT_DB_RAW", "DBT_TARGET", "KEY", "POWER_BI_URL", "PWA_HOST"] {
+            assert!(!sensitive_name(name), "{name} should not be treated as sensitive");
+        }
     }
 
     #[test]

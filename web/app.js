@@ -29,6 +29,9 @@ const S = {
   sidecar: null,              // payload of /api/sidecar: the Snowflake lineage switch and its script
   colAsk: 0,                  // bumped on every column click, so only the latest answer is drawn
   colAnswered: false,         // Snowflake has answered once on this page, so no sign-in tab is expected
+  nodeCache: new Map(),       // /api/node payloads, by query: hover asks far more often than click
+  nodeGen: 0,                 // bumped when the manifest or a .env file changes under the cache
+  vars: null,                 // payload of /api/vars, for the editor's var() marks
 };
 
 // ------------------------------------------------------------------ util --
@@ -54,6 +57,58 @@ const api = {
     return r.json();
   },
 };
+
+/* One /api/node payload per node, shared by the catalog, the ref() marks and the
+   hover card. The server rediscovers the .env files and walks the graph twice on
+   every request, which a click could afford and a hover cannot. The promise is
+   what is stored, not the value: a hover and the click that follows it 30ms
+   later are then one request rather than two.
+
+   The entry expires, because the server reloads the graph by itself when dbt
+   rewrites the artifacts (watch_artifacts, every three seconds) and never tells
+   the browser. Before this cache existed every click refetched, so a `dbt build`
+   in the terminal showed up on the next click; an entry that outlived that poll
+   would take that back. Three seconds is the server's own interval, so the cache
+   is never staler than the thing it is caching. */
+const NODE_CACHE_MAX = 200;
+const NODE_CACHE_TTL = 3000;
+
+function nodeKey(q) {
+  return q.id ? 'id:' + q.id : 'file:' + q.file;
+}
+
+function nodeDetail(q) {
+  const key = nodeKey(q);
+  const hit = S.nodeCache.get(key);
+  if (hit && hit.gen === S.nodeGen && Date.now() - hit.at < NODE_CACHE_TTL) return hit.p;
+  const path = q.id ? '/api/node?id=' + encodeURIComponent(q.id) : '/api/node?file=' + encodeURIComponent(q.file);
+  // A failed request must not be remembered as the answer.
+  const p = api.get(path).catch((e) => { S.nodeCache.delete(key); throw e; });
+  S.nodeCache.set(key, { gen: S.nodeGen, at: Date.now(), p });
+  if (S.nodeCache.size > NODE_CACHE_MAX) S.nodeCache.delete(S.nodeCache.keys().next().value);
+  return p;
+}
+
+/* The project's vars, plus any env var asked for by name. Keyed by the chosen
+   environment as well, because the same var resolves differently under each. */
+function fetchVars(names) {
+  const key = (S.env || '') + '|' + (names || '');
+  if (!S.vars) S.vars = new Map();
+  const hit = S.vars.get(key);
+  if (hit) return hit;
+  let url = '/api/vars?env=' + encodeURIComponent(S.env || '');
+  if (names) url += '&names=' + encodeURIComponent(names);
+  const p = api.get(url).catch((e) => { S.vars.delete(key); throw e; });
+  S.vars.set(key, p);
+  return p;
+}
+
+/* The manifest was reloaded, or a file the payload derives from was saved. */
+function dropNodeCache() {
+  S.nodeGen++;
+  S.nodeCache.clear();
+  S.vars = null;
+}
 
 function toast(msg, kind = '') {
   const t = document.createElement('div');
@@ -213,6 +268,57 @@ function scanCalls(text) {
   return found;
 }
 
+/* var('x') / var('x', default) / env_var('X') / env_var('X', 'd') -> hover marks.
+   The dbt-sql mode gives var, env_var, ref and source the same `jinja-dbt`
+   token, so the token type cannot tell them apart. The scanner can. */
+const VAR_RE = /\b(var|env_var)\s*\(\s*(['"])([^'"\n]+)\2\s*(?:,([^)\n]*))?\)/g;
+
+function scanVars(text) {
+  const found = [];
+  let m;
+  VAR_RE.lastIndex = 0;
+  while ((m = VAR_RE.exec(text)) !== null) {
+    // \b matches after a dot too, so dbt_utils.var('x') would otherwise count.
+    if (text[m.index - 1] === '.') continue;
+    // The whole call, not just the name inside the quotes the way scanCalls
+    // marks a ref(). A ref's name is the thing you click, so a tight target is
+    // right there; a variable has nothing to click, and `var('x')` reads as one
+    // word, so anything less than the whole of it is a target you have to aim at.
+    found.push({
+      kind: m[1],
+      name: m[3],
+      fallback: m[4] === undefined ? '' : m[4].trim(),
+      ranges: [[m.index, m.index + m[0].length]],
+    });
+  }
+  return found;
+}
+
+/* The line under a variable's value, saying where the value came from. Pure, so
+   the wording can be checked without a DOM. `env` is the chosen file's name, or
+   '' when this tab is showing the manifest as dbt parsed it. */
+function varNote(row, env) {
+  const names = (row.vars || []).join(', ');
+  const where = env || 'any environment file';
+  if (row.redacted) {
+    return row.status === 'env' || row.status === 'placeholder'
+      ? `set in ${where}, hidden because the name reads as a credential`
+      : 'hidden because the name reads as a credential';
+  }
+  switch (row.status) {
+    case 'env':
+      return row.default_used ? 'the default written in the call, not from a file' : `read from ${where}`;
+    case 'missing':
+      return env ? `${names} is not set in ${env}` : `${names} needs an environment, and none is selected`;
+    case 'placeholder':
+      return `${names} is a placeholder in ${where}, not a real value`;
+    case 'unevaluated':
+      return 'not evaluated: a secret, or Jinja this does not read';
+    default:
+      return '';
+  }
+}
+
 /* automate_dv declares parents through a YAML metadata block rather than ref(),
    in more shapes than are worth chasing with one regex per shape:
 
@@ -251,7 +357,7 @@ async function markRefs(doc, path) {
   // The manifest is the authority on what this file actually depends on.
   let parents = [];
   if (path) {
-    try { parents = (await api.get('/api/node?file=' + encodeURIComponent(path))).parents; }
+    try { parents = (await nodeDetail({ file: path })).parents; }
     catch { /* not a dbt node: ref() calls are still linked below */ }
   }
   const known = {};
@@ -287,11 +393,30 @@ async function markRefs(doc, path) {
       const title = target
         ? `${target.disabled ? 'DISABLED ' : ''}${target.kind}${target.materialized ? ' · ' + target.materialized : ''}\n${target.file}`
         : `${hit.name} is in no manifest node (stale manifest or a typo)`;
+      // No `attributes: {title}`: the native tooltip it drew is now the hover
+      // card's job, and the two would overlap. The line it used to show is kept
+      // on the mark so the card can say exactly the same thing.
       const mark = doc.markText(doc.posFromIndex(from), doc.posFromIndex(to), {
         className: 'cm-reflink' + (target ? (target.disabled ? ' dis' : '') : ' missing'),
-        attributes: { title },
       });
       mark.refTarget = target || { name: hit.name };
+      mark.refTitle = title;
+    }
+  }
+}
+
+/* Marks every var() and env_var() call so the hover card has something to
+   attach to. Synchronous on purpose: the values arrive when a card opens, not
+   on every keystroke. markRefs only ever clears its own refTarget marks and
+   this only ever clears its own, and ref|source and var|env_var are disjoint,
+   so the two never contend for a range. */
+function markVars(doc) {
+  doc.getAllMarks().forEach((mk) => { if (mk.varTarget) mk.clear(); });
+  const text = maskJinjaComments(doc.getValue());
+  for (const hit of scanVars(text)) {
+    for (const [from, to] of hit.ranges) {
+      const mark = doc.markText(doc.posFromIndex(from), doc.posFromIndex(to), { className: 'cm-varlink' });
+      mark.varTarget = hit;
     }
   }
 }
@@ -310,6 +435,38 @@ function wireRefClicks(cm) {
     focusNode(t.id);
     revealInTree(t.file);
   });
+}
+
+/* Hovering a mark opens the card. The classList gate comes first because
+   coordsChar snaps to the nearest character even far past the end of a line, so
+   without it every move over the empty area to the right of a line would
+   resolve onto whatever mark that line ends with. */
+function wireHovers(cm) {
+  const wrap = cm.getWrapperElement();
+  wrap.addEventListener('mousemove', (e) => {
+    const cl = e.target.classList;
+    if (!cl) return hoverLeave();
+    const isVar = cl.contains('cm-varlink');
+    if (!isVar && !cl.contains('cm-reflink')) return hoverLeave();
+    const pos = cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window');
+    const at = () => cm.charCoords(pos, 'window');
+    if (isVar) {
+      const vm = cm.findMarksAt(pos).find((mk) => mk.varTarget);
+      if (!vm) return hoverLeave();
+      return hoverEnter(`${vm.varTarget.kind}:${vm.varTarget.name}`, at, (el) => fillVarCard(el, vm.varTarget));
+    }
+    const mark = cm.findMarksAt(pos).find((mk) => mk.refTarget);
+    if (!mark) return hoverLeave();
+    const t = mark.refTarget;
+    if (!t.id) {
+      return hoverEnter('miss:' + t.name, at, (el) => {
+        hoverCardBody(el, { title: t.name });
+        el.append(Object.assign(document.createElement('div'), { className: 'hc-desc muted', textContent: mark.refTitle }));
+      });
+    }
+    hoverEnter('node:' + t.id, at, (el) => fillNodeCard(el, t.id, t));
+  });
+  wrap.addEventListener('mouseleave', hoverLeave);
 }
 
 function modeFor(path) {
@@ -339,9 +496,10 @@ function initEditor() {
   S.cm.on('change', () => {
     clearTimeout(rescan);
     const doc = S.cm.getDoc();
-    rescan = setTimeout(() => markRefs(doc, S.active), 500);
+    rescan = setTimeout(() => { markRefs(doc, S.active); markVars(doc); }, 500);
   });
   wireRefClicks(S.cm);
+  wireHovers(S.cm);
 }
 
 const base = (path) => path.split('/').pop();
@@ -355,6 +513,7 @@ const dirOf = (path) => {
    one, the way a single click does in VS Code. Editing it, or opening it again
    with preview off, pins it. */
 async function openFile(path, { focusLineage = true, preview = false } = {}) {
+  closeHoverCard();
   if (S.open.has(path)) {
     if (!preview && S.preview === path) S.preview = null;
     return activate(path, focusLineage);
@@ -375,6 +534,7 @@ async function openFile(path, { focusLineage = true, preview = false } = {}) {
   S.order.splice(slot, 0, path);
   if (preview) S.preview = path;
   markRefs(doc, path);
+  markVars(doc);
   activate(path, focusLineage);
 }
 
@@ -575,6 +735,9 @@ async function saveFile(path) {
   try {
     await api.send('/api/file', 'PUT', { path, content: f.doc.getValue() });
     f.dirty = false;
+    // Resolved locations and var values are derived from these two, so a cached
+    // payload would keep showing what they used to say.
+    if (base(path).startsWith('.env') || base(path) === 'dbt_project.yml') dropNodeCache();
     return true;
   } catch (e) {
     toast(`save failed for ${base(path)}: ${e.message}`, 'err');
@@ -1272,6 +1435,7 @@ function resolveBlock(cm, b, side) {
 
 // ---------------------------------------------------------------- lineage --
 async function focusNode(id, { open = false } = {}) {
+  closeHoverCard();
   S.focus = id;
   S.graphMode = 'model';
   S.colFocus = null;
@@ -1281,7 +1445,7 @@ async function focusNode(id, { open = false } = {}) {
   try {
     const [sub, detail] = await Promise.all([
       api.get(`/api/lineage?id=${encodeURIComponent(id)}&up=${up}&down=${down}&tests=${tests}`),
-      api.get('/api/node?id=' + encodeURIComponent(id)),
+      nodeDetail({ id }),
     ]);
     $('#lineage-empty').classList.add('hidden');
     Lineage.render(sub);
@@ -1516,7 +1680,7 @@ async function openColumn(n, column) {
       applyMeta((await api.get('/api/meta')).meta);
       if (S.node && S.node.id === n.id) {
         S.colHighlight = column;
-        renderCatalog(await api.get('/api/node?id=' + encodeURIComponent(n.id)));
+        renderCatalog(await nodeDetail({ id: n.id }));
       }
     }
     const outside = res.unmatched_total
@@ -1589,7 +1753,7 @@ function paintMode() {
 
 async function syncNode(path) {
   try {
-    const detail = await api.get('/api/node?file=' + encodeURIComponent(path));
+    const detail = await nodeDetail({ file: path });
     if (detail.id !== S.focus) focusNode(detail.id);
   } catch { /* file is not a dbt node: leave the lineage as it is */ }
 }
@@ -1780,6 +1944,236 @@ function stat(label, value, onClick) {
   return s;
 }
 
+// -------------------------------------------------------------- hover card --
+/* One floating card, shared by the lineage boxes and the editor's marks. It is
+   hoverable, so its text can be read and selected, but holds no focusable
+   control: a surface that opens by accident should not also own a focus trap
+   and an Escape contract the way the env menu has to. */
+const HOVER_DELAY = 350;   // a sweep across a dense graph must open nothing
+const HOVER_GRACE = 180;   // time for the pointer to cross the gap into the card
+const HOVER_COLS = 8;      // the card never scrolls: the rest is counted, not listed
+
+/* Where a box of size `box` goes next to `at`, inside `view`. Below when it
+   fits, above when it does not, clamped rather than clipped when neither works.
+   `view` is a parameter rather than a read of `window` so this can be checked
+   without a DOM. */
+function placeFloating(at, box, view, gap = 8) {
+  const below = at.bottom + gap + box.height <= view.height;
+  const above = at.top - gap - box.height >= 0;
+  let top;
+  if (below) top = at.bottom + gap;
+  else if (above) top = at.top - gap - box.height;
+  else top = Math.max(4, Math.min(at.bottom + gap, view.height - box.height - 4));
+  // A box wider than the viewport pins to the left edge rather than going negative.
+  const left = Math.max(4, Math.min(at.left, view.width - box.width - 4));
+  return { top, left, above: !below && above };
+}
+
+/* The head every card shares. Returns the element so a filler can keep appending. */
+function hoverCardBody(el, { title, tone, sub, crumb }) {
+  el.textContent = '';
+  const head = document.createElement('div');
+  head.className = 'hc-head';
+  if (tone) head.appendChild(tone);
+  head.append(Object.assign(document.createElement('span'), { className: 'hc-name', textContent: title }));
+  el.appendChild(head);
+  if (sub) el.append(Object.assign(document.createElement('div'), { className: 'hc-sub', textContent: sub }));
+  if (crumb) el.append(Object.assign(document.createElement('div'), { className: 'hc-crumb', textContent: crumb }));
+  return el;
+}
+
+let hoverCard = null;                        // { el, at, off }
+let hoverTimer = null, hoverGrace = null;
+let hoverKey = '';                           // what the card shows, or is about to
+
+function closeHoverCard() {
+  clearTimeout(hoverTimer);
+  clearTimeout(hoverGrace);
+  hoverTimer = hoverGrace = null;
+  hoverKey = '';
+  if (!hoverCard) return;
+  const { el, off } = hoverCard;
+  hoverCard = null;
+  off();
+  el.remove();
+}
+
+/* Re-measured after every paint: a card that grows when the payload lands would
+   otherwise keep the position its first, shorter self was given. */
+function placeHoverCard() {
+  if (!hoverCard) return;
+  const box = hoverCard.el.getBoundingClientRect();
+  const p = placeFloating(hoverCard.at, { width: box.width, height: box.height },
+    { width: window.innerWidth, height: window.innerHeight });
+  hoverCard.el.style.top = `${p.top}px`;
+  hoverCard.el.style.left = `${p.left}px`;
+}
+
+function openHoverCard(at, fill) {
+  const el = document.createElement('div');
+  el.className = 'hovercard';
+  el.setAttribute('role', 'tooltip');
+  document.body.appendChild(el);
+  hoverCard = { el, at, off: () => {} };
+  fill(el);
+  placeHoverCard();
+
+  el.addEventListener('mouseenter', () => { clearTimeout(hoverGrace); hoverGrace = null; });
+  el.addEventListener('mouseleave', hoverLeave);
+
+  // Typing means the card is not being read.
+  const onKey = () => closeHoverCard();
+  // Deliberately no preventDefault: a click on a ref() still has to reach wireRefClicks.
+  const onDown = (e) => { if (!el.contains(e.target)) closeHoverCard(); };
+  const onScroll = (e) => { if (!el.contains(e.target)) closeHoverCard(); };
+  const onResize = () => closeHoverCard();
+  document.addEventListener('keydown', onKey, true);
+  document.addEventListener('mousedown', onDown, true);
+  document.addEventListener('scroll', onScroll, true);
+  window.addEventListener('resize', onResize);
+  hoverCard.off = () => {
+    document.removeEventListener('keydown', onKey, true);
+    document.removeEventListener('mousedown', onDown, true);
+    document.removeEventListener('scroll', onScroll, true);
+    window.removeEventListener('resize', onResize);
+  };
+}
+
+/* `key` identifies what is under the pointer, so a mousemove that stays on the
+   same thing neither restarts the delay nor repaints. Moving to a different one
+   while a card is open swaps it without waiting again, the way a group of
+   tooltips behaves. */
+function hoverEnter(key, getRect, fill) {
+  clearTimeout(hoverGrace);
+  hoverGrace = null;
+  if (key === hoverKey) return;
+  const swap = !!hoverCard;
+  clearTimeout(hoverTimer);
+  hoverTimer = null;
+  hoverKey = key;
+  // The rect is read when the card opens, not now: a pan during the delay would
+  // otherwise anchor it where the box used to be.
+  const show = () => {
+    hoverTimer = null;
+    if (hoverCard) { hoverCard.off(); hoverCard.el.remove(); hoverCard = null; }
+    openHoverCard(getRect(), fill);
+  };
+  if (swap) show();
+  else hoverTimer = setTimeout(show, HOVER_DELAY);
+}
+
+function hoverLeave() {
+  clearTimeout(hoverTimer);
+  hoverTimer = null;
+  if (!hoverCard) { hoverKey = ''; return; }
+  clearTimeout(hoverGrace);
+  hoverGrace = setTimeout(closeHoverCard, HOVER_GRACE);
+}
+
+/* Painted twice: once from what the caller already holds, so the card appears
+   with the pointer, and again when /api/node answers with the description and
+   the columns. */
+function fillNodeCard(el, id, seed) {
+  const paint = (n, full) => {
+    if (!hoverCard || hoverCard.el !== el) return;   // closed, or swapped for another
+    const tone = dot(n);
+    tone.removeAttribute('title');           // no native tooltip inside the card
+    hoverCardBody(el, { title: n.name || id, tone, sub: Lineage.subtitle(n), crumb: n.file || id });
+    if (n.disabled) {
+      const off = Object.assign(document.createElement('span'), { className: 'offchip', textContent: 'disabled' });
+      el.querySelector('.hc-head').appendChild(off);
+    }
+    if (!full) return;
+
+    el.append(Object.assign(document.createElement('div'), {
+      className: 'hc-desc' + (n.description ? '' : ' muted'),
+      textContent: n.description || 'No description in the YAML.',
+    }));
+
+    const counts = [`${n.columns.length} columns`, `${n.upstream_total} upstream`,
+      `${n.downstream_total} downstream`, `${n.tests.length} tests`];
+    el.append(Object.assign(document.createElement('div'), { className: 'hc-counts', textContent: counts.join('  ·  ') }));
+
+    if (n.columns.length) {
+      const list = document.createElement('div');
+      list.className = 'hc-cols';
+      for (const c of n.columns.slice(0, HOVER_COLS)) {
+        const row = document.createElement('div');
+        row.className = 'hc-col';
+        row.append(Object.assign(document.createElement('span'), { className: 'c-name', textContent: c.name }));
+        row.append(Object.assign(document.createElement('span'), { className: 'c-type', textContent: c.data_type || '' }));
+        list.appendChild(row);
+      }
+      if (n.columns.length > HOVER_COLS) {
+        list.append(Object.assign(document.createElement('div'), {
+          className: 'hc-more', textContent: `+${n.columns.length - HOVER_COLS} more`,
+        }));
+      }
+      el.appendChild(list);
+    }
+
+    if (n.tags && n.tags.length) {
+      const tags = document.createElement('div');
+      tags.className = 'hc-tags';
+      for (const t of n.tags) tags.append(Object.assign(document.createElement('span'), { className: 'tagchip', textContent: t }));
+      el.appendChild(tags);
+    }
+    placeHoverCard();
+  };
+
+  paint(seed, false);
+  nodeDetail({ id }).then((n) => paint(n, true)).catch(() => {});
+}
+
+/* A variable's value. The head is painted at once and the value replaces a
+   placeholder line when /api/vars answers. */
+function fillVarCard(el, t) {
+  const call = `${t.kind}('${t.name}')`;
+  const envLabel = S.env || '';
+  hoverCardBody(el, { title: call, sub: t.kind === 'env_var' ? 'environment variable' : 'project var' });
+  el.append(Object.assign(document.createElement('div'), { className: 'hc-note muted', textContent: 'reading...' }));
+
+  const show = (value, sub, crumb, tone) => {
+    if (!hoverCard || hoverCard.el !== el) return;   // closed, or swapped for another
+    el.textContent = '';
+    hoverCardBody(el, { title: call, sub: t.kind === 'env_var' ? 'environment variable' : 'project var', crumb });
+    if (value !== null) {
+      el.append(Object.assign(document.createElement('div'), {
+        className: 'hc-value' + (value === '' ? ' muted' : ''),
+        textContent: value === '' ? '(empty)' : value,
+      }));
+    }
+    if (sub) el.append(Object.assign(document.createElement('div'), { className: 'hc-note ' + (tone || 'muted'), textContent: sub }));
+    placeHoverCard();
+  };
+
+  fetchVars(t.kind === 'env_var' ? t.name : '').then((body) => {
+    if (t.kind === 'env_var') {
+      const row = (body.env_vars || [])[0];
+      if (!row) return show(null, 'no answer for this name', '', 'warn');
+      const fallback = t.fallback ? `\ndefault written in this call: ${t.fallback}` : '';
+      return show(row.value === undefined ? null : row.value, varNote(row, envLabel) + fallback,
+        envLabel || 'no environment selected', row.redacted ? 'warn' : '');
+    }
+    const row = (body.vars || []).find((v) => v.name === t.name);
+    if (!row) {
+      const miss = t.fallback
+        ? `not in the vars: block, so the default in this call is used: ${t.fallback}`
+        : 'not in the vars: block of dbt_project.yml';
+      return show(null, miss, body.file, 'warn');
+    }
+    const lines = [];
+    // A redacted value is never shown, but the expression that produced it is
+    // text from the repository, so "as written" still earns its place.
+    const value = row.null || row.redacted ? null : (row.resolved !== undefined ? row.resolved : row.raw);
+    if (row.null) lines.push('declared with no value, so var() returns null');
+    if (row.status) lines.push(varNote(row, envLabel));
+    else if (row.redacted) lines.push('hidden because the name reads as a credential');
+    if (row.status && row.raw) lines.push('as written: ' + row.raw);
+    show(value, lines.filter(Boolean).join('\n'), `${body.file}:${row.line}`, row.redacted ? 'warn' : '');
+  }).catch(() => show(null, 'could not read dbt_project.yml', '', 'warn'));
+}
+
 // ------------------------------------------------------------ environments --
 /* Which .env file resolves locations. The choice lives in this tab: the stored
    one is only where a fresh tab starts, so two tabs never draw one environment's
@@ -1807,6 +2201,9 @@ function envDisplayName(file) {
 }
 
 async function loadEnvs() {
+  // Re-reading the env list means the .env files were re-read too, so any
+  // resolution cached against the old ones is stale.
+  dropNodeCache();
   try { S.envs = await api.get('/api/envs'); } catch { S.envs = null; }
   // The stored choice is where a fresh tab starts, and nothing more: after the
   // first load this tab keeps its own.
@@ -2767,6 +3164,10 @@ function wireKeys() {
 
 // ------------------------------------------------------------------ boot --
 function applyMeta(meta) {
+  // Every caller of this has just learned the graph changed, which is exactly
+  // when a cached /api/node payload stops being true. Here rather than at each
+  // call site: forgetting one is how a stale count survives a column fetch.
+  dropNodeCache();
   S.meta = meta;
   $('#project').textContent = meta.project || '(no manifest)';
   const c = meta.counts || {};
@@ -2799,8 +3200,15 @@ async function boot() {
       const { node: nodeId, column } = splitColId(n.id);
       S.colHighlight = column;
       if (column) S.catTab = 'columns';
-      api.get('/api/node?id=' + encodeURIComponent(nodeId)).then(renderCatalog).catch(() => {});
+      nodeDetail({ id: nodeId }).then(renderCatalog).catch(() => {});
     },
+    onHover: (n, g) => {
+      const { node: nodeId, column } = splitColId(n.id);
+      if (column) return;                  // in column mode the box already says everything
+      hoverEnter('node:' + nodeId, () => g.getBoundingClientRect(), (el) => fillNodeCard(el, nodeId, n));
+    },
+    onHoverOut: hoverLeave,
+    onHoverClose: closeHoverCard,
     onOpen: (n) => {
       const { node: nodeId, column } = splitColId(n.id);
       if (column && sidecarOn()) {
@@ -2827,6 +3235,11 @@ async function boot() {
   applyMeta(info.meta);
   await loadSidecar();
   $('#status-shell').textContent = info.shell;
+  // Which build drew this page. A release binary embeds web/ (0005), so this is
+  // what tells a stale binary from a frontend change that really did nothing.
+  const build = $('#status-build');
+  build.textContent = 'v' + (info.version || '?');
+  build.title = `dbt-lens ${info.version || '?'}\n${info.build || 'no build stamp'}`;
   const v = info.venv || {};
   const venvEl = $('#status-venv');
   if (v.name) {

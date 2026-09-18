@@ -47,6 +47,19 @@ check('a single test is singular',
       subtitle({ kind: 'model', materialized: 'table', schema: 's', tests: 1 }),
       'table  ·  s  ·  1 test');
 
+// The hover card passes an /api/node payload, where tests is a list of nodes
+// rather than a count. Stringifying it put "[object Object]" on the line.
+check('a list of tests is counted, not stringified',
+      subtitle({ kind: 'model', materialized: 'incremental', schema: 'dbt_dev',
+                 tests: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] }),
+      'incremental  ·  dbt_dev  ·  3 tests');
+check('a list with one test is singular',
+      subtitle({ kind: 'model', materialized: 'view', schema: 's', tests: [{ id: 'a' }] }),
+      'view  ·  s  ·  1 test');
+check('an empty list adds nothing',
+      subtitle({ kind: 'model', materialized: 'view', schema: 's', tests: [] }),
+      'view  ·  s');
+
 print('\n--- Snowflake lineage switch ---');
 check('no payload reads as off', sidecarLabel(null).text, 'Snowflake lineage: off');
 check('off explains that nothing connects before a click',

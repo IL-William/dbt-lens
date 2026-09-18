@@ -156,7 +156,7 @@ opens a browser:
   reading /home/you/analytics/target/manifest.json
   2104 nodes in 180 ms  (412 models, 96 sources, 1508 tests)
 
-  dbt-lens  0.1.0
+  dbt-lens  0.2.0  (v0.2.0, built 2026-09-18)
   project   /home/you/analytics
   shell     /bin/zsh -l
   venv      dbt-env (activated, python 3.12)
@@ -165,7 +165,10 @@ opens a browser:
 
 Those lines are worth reading once: they say which project, manifest, shell and
 Python environment were picked up, which is where nearly every setup mistake
-shows up first. `Ctrl+C` in that terminal stops the server. Every flag is listed
+shows up first. The version carries the build it came from, from
+`git describe`, so two installs of the same release are still told apart; the
+status bar shows the same thing at the bottom right of the page, and `dbt-lens
+--version` prints it without starting anything. `Ctrl+C` in that terminal stops the server. Every flag is listed
 under [Options](#options).
 
 Only the manifest fields the UI needs are read and the rest is ignored, so a
@@ -185,6 +188,7 @@ it is used against day to day.
 | the Snowflake lineage switch says `failed` | the script could not start, and its tooltip says why | usually no `snowflake-connector-python` in the Python it found, or no `profiles.yml` it can read |
 | a clicked column comes back with no lineage | the object was not built by a query Snowflake could analyse, or the role cannot see it | check with `sf_lineage.py probe`, and check the environment pill names the objects you mean |
 | no browser opened | `--no-open`, or no default browser | open the printed URL by hand |
+| a fix seems to have no effect after reinstalling | the running binary is an older build | compare `dbt-lens --version` with `git describe --tags --always --dirty` in the clone; on Windows, stop dbt-lens first, since the `.exe` cannot be replaced while it runs |
 
 ## Why
 
@@ -203,6 +207,7 @@ sub-graphs around whichever model you are looking at.
 | `Alt + W`, or middle-click a tab | close a tab |
 | `Cmd/Ctrl + \`` | jump to the terminal |
 | click a column in Catalog > Columns | draw its lineage, fetched from Snowflake when the switch is on |
+| hover a lineage node, a `ref()` or a `var()` | a card with what it is |
 | click a lineage node | select it, fill the Node panel |
 | double-click a lineage node | re-centre the lineage on it and open its file |
 | `+N` badge on a node | pull in one more level of parents or children |
@@ -247,6 +252,30 @@ dbt-core, and
 `catalog.json` is picked up automatically, filling in
 the real warehouse types and listing the columns that exist in the warehouse but
 are not documented (shown in italics).
+
+### Hover cards
+
+Pausing on a lineage box, or on a `ref()` / `source()` in the editor, opens a
+small card with the model's description, its first columns and their types, the
+upstream, downstream and test counts, and its tags. It is the Catalog Preview in
+passing, without leaving the file or the graph. Panning, zooming, scrolling,
+clicking or typing dismisses it, and a click on a `ref()` still navigates.
+
+Pausing on a `var('x')` or an `env_var('X')` shows what that variable is worth.
+This is the one thing dbt's own artifacts cannot tell you: the manifest holds no
+`vars` at all, so the values are read straight from the `vars:` block of
+`dbt_project.yml`, and the card names the line they came from. A var whose value
+is itself `{{ env_var(...) }}` is resolved under the environment selected in the
+status bar, and the card says whether the value came from that file or from the
+default written in the call. Any line of the block it could not read is reported
+with its line number rather than quietly skipped.
+
+Two things are never shown, both refused on the server rather than hidden in the
+page: a `DBT_ENV_SECRET_*`, which dbt itself marks as never renderable, and any
+variable whose name reads as a credential (`SNOWFLAKE_PASSWORD`, `DBT_API_KEY`,
+`SF_PW`). Those still show their name and whether the file defines them, which
+is usually the question anyway. Ordinary config keeps working: `PARTITION_KEY`
+and `DBT_UNIQUE_KEY` are not credentials.
 
 `manifest.json` is polled every three seconds: run `dbt build` in the built-in
 terminal and the lineage refreshes on its own when dbt rewrites the file.
@@ -545,6 +574,8 @@ $JSC web/tests/diff.js        # diff ruler geometry, clamping and pane heights
 $JSC web/tests/palette.js     # search palette merging nodes and files
 $JSC web/tests/location.js    # written, resolved and built locations
 $JSC web/tests/jinja.js       # Jinja colouring, and SQL never shown the Jinja
+$JSC web/tests/hovercard.js   # where a hover card lands beside its anchor
+$JSC web/tests/vars.js        # var() / env_var() scanning, and where a value came from
 ```
 
 The Snowflake script has tests of its own, against a fake connector and a fake
@@ -564,6 +595,7 @@ src/collin.rs     the column lineage cache, merged like catalog.json
 src/sidecar.rs    the Snowflake script: started by the switch, one request at a time
 src/compiled.rs   compiled SQL lookup and freshness
 src/envs.rs       .env parsing and location resolution per environment
+src/project.rs    the vars: block of dbt_project.yml, read by hand
 src/git.rs        working tree status and the git commands the UI can run
 src/settings.rs   per-project settings, kept outside the project
 src/venv.rs       which Python environment is in play

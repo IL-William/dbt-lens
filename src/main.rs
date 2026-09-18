@@ -9,6 +9,7 @@ mod files;
 mod git;
 mod graph;
 mod manifest;
+mod project;
 mod pty;
 mod settings;
 mod sidecar;
@@ -19,7 +20,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "dbt-lens", version, about = "Editor, terminal and dbt lineage in the browser")]
+/// `version` is composed rather than taken from Cargo.toml alone: the package
+/// version only moves at a release, and the question after reinstalling is
+/// which build this is (see `build.rs`).
+#[command(
+    name = "dbt-lens",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("DBT_LENS_BUILD"), ")"),
+    about = "Editor, terminal and dbt lineage in the browser"
+)]
 struct Args {
     /// dbt project root
     #[arg(default_value = ".")]
@@ -126,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { st.sidecar.start_for(&st.root, &st.venv).await });
     }
 
-    eprintln!("\n  dbt-lens  {}", env!("CARGO_PKG_VERSION"));
+    eprintln!("\n  dbt-lens  {}  ({})", env!("CARGO_PKG_VERSION"), env!("DBT_LENS_BUILD"));
     eprintln!("  project   {}", root.display());
     eprintln!("  shell     {} {}", shell.program, shell.args.join(" "));
     if !venv.name.is_empty() {

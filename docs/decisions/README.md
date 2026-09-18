@@ -23,6 +23,8 @@ it is built this way, for whoever changes it next.
 | [0015](0015-the-browser-is-not-trusted.md) | The browser is not trusted: Host and Origin are checked | adding a route, changing the port logic, or adding a CORS header |
 | [0016](0016-column-lineage-on-demand.md) | Column lineage on demand, behind a switch | starting a process from the server, or changing what clicking a column does |
 | [0017](0017-the-profile-is-reachable.md) | The dbt profile is reachable, and it alone | opening, reading or writing anything outside the project |
+| [0018](0018-project-vars-by-scanner.md) | The `vars:` block is read by a scanner, not a YAML parser | reading a `.yml` file from the server, or reaching for a YAML parser |
+| [0019](0019-a-resolved-value-may-be-shown.md) | A resolved value may reach the browser, under two guards | returning any value derived from a `.env` file |
 
 ## Keeping these honest
 

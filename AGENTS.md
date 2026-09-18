@@ -45,14 +45,18 @@ frontend fix does not exist in a release binary until it is rebuilt (see 0005).
 - **Never run dbt.** The binary never talks to a warehouse either:
   `tools/sf_lineage.py` does, started by the server only once the user switches
   Snowflake lineage on, under their own credentials (0002, 0016).
-- **Never return or log a `.env` value.** Resolved locations and `DBT_TARGET`
-  are the only things derived from them that leave the server (0012).
+- **Never return or log a `.env` value**, beyond the three things allowed to
+  leave: resolved locations, `DBT_TARGET` (0012, 0017), and a resolved
+  `env_var()` in the hover card, which passes two guards first (0019).
 - **Nothing outside the project is read or written**, except the one dbt profile
   the Snowflake script names, through its own route (0017).
 - **Treat this repository as public.** Fixtures and examples are invented, never
   taken from a real project (0014).
 - **The browser is not trusted.** Every route sits behind the Host and Origin
   guard in `src/api.rs`, and no CORS header is ever added (0015).
+- **Bump the version in `Cargo.toml` and tag the commit** for anything anyone
+  installs. Between tags the build stamp tells builds apart; the version is
+  what says a release happened.
 - **Comments say why, not what.** The code already says what it does.
 - **No em dash** in code, comments or documentation.
 
@@ -81,10 +85,12 @@ frontend fix does not exist in a release binary until it is rebuilt (see 0005).
 | rename a function in `web/app.js`, or add a test | [0013](docs/decisions/0013-tests-without-a-toolchain.md) |
 | add a route, change the port logic, or add a CORS header | [0015](docs/decisions/0015-the-browser-is-not-trusted.md) |
 | start a process from the server, or touch `src/sidecar.rs` | [0016](docs/decisions/0016-column-lineage-on-demand.md) |
+| read a `.yml` file from the server, or reach for a YAML parser | [0018](docs/decisions/0018-project-vars-by-scanner.md) |
+| return any value derived from a `.env` file | [0019](docs/decisions/0019-a-resolved-value-may-be-shown.md) |
 | set this up for someone, rather than change it | [README, Getting started](README.md#getting-started) |
 | pick up the next piece of work | [docs/state.md](docs/state.md) |
 
-All seventeen decisions, with what was rejected each time, are indexed in
+All nineteen decisions, with what was rejected each time, are indexed in
 [docs/decisions/](docs/decisions/). The [README](README.md) is the user-facing
 documentation: what the tool does and how to use it. Rationale lives here, never
 in both.
@@ -93,7 +99,8 @@ in both.
 
 `src/manifest.rs` reads the manifest, `src/graph.rs` holds the compact graph,
 `src/api.rs` serves HTTP and WebSocket, and the remaining modules take one
-concern each: `envs`, `settings`, `git`, `collin`, `sidecar`, `compiled`,
-`venv`, `files`, `pty`. `web/` is the frontend, `web/vendor/` the vendored
-libraries, `tools/sf_lineage.py` the only piece that talks to a warehouse. The
-README has the annotated version.
+concern each: `envs`, `project`, `settings`, `git`, `collin`, `sidecar`,
+`compiled`, `venv`, `files`, `pty`. `build.rs` stamps the binary with
+`git describe`, so two builds of one release can be told apart. `web/` is the
+frontend, `web/vendor/` the vendored libraries, `tools/sf_lineage.py` the only
+piece that talks to a warehouse. The README has the annotated version.

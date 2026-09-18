@@ -1,6 +1,6 @@
 # 0017. The dbt profile is reachable, and it alone
 
-Date: 2026-09-18 · Status: accepted · Supersedes 0012
+Date: 2026-09-18 · Status: accepted, amended by 0019 · Supersedes 0012
 
 **Trigger:** read before opening, reading or writing anything outside the
 project.
@@ -30,6 +30,8 @@ where 0012 says nothing is read.
 What 0012 said and still holds: `.env` values never leave the server,
 `DBT_ENV_SECRET_*` is never substituted, the server binds to `127.0.0.1`, and
 the binary makes no outbound call of its own.
+*Amended by [0019](0019-a-resolved-value-may-be-shown.md): a resolved
+`env_var()` value may leave, under two guards.*
 
 ## Rejected
 
