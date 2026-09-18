@@ -109,6 +109,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/profiles", get(read_profile).put(write_profile))
         .route("/api/dir", get(dir))
         .route("/api/files", get(file_search))
+        .route("/api/grep", get(grep))
         .route("/api/file", get(read_file).put(write_file))
         .route("/api/resolve", post(resolve))
         .route("/api/git", get(git_status))
@@ -1187,6 +1188,38 @@ async fn file_search(State(st): State<Arc<AppState>>, Query(q): Query<FileQuery>
     let index = st.file_index.read().await.clone();
     let hits = files::search_paths(&index, &q.q, q.limit.unwrap_or(60).min(500));
     Json(hits).into_response()
+}
+
+#[derive(Deserialize)]
+struct GrepQuery {
+    q: String,
+    /// Files to report, not matches: a word in 400 models is a real answer.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// The shortest query worth walking the project for. One or two characters
+/// match nearly every file and cost a full read of each.
+const GREP_MIN_QUERY: usize = 3;
+const GREP_DEFAULT_FILES: usize = 200;
+const GREP_MAX_FILES: usize = 500;
+const GREP_PER_FILE: usize = 20;
+
+/// Searches file contents, which the path index cannot do. `.env` files are
+/// never opened here (0020).
+async fn grep(State(st): State<Arc<AppState>>, Query(q): Query<GrepQuery>) -> Response {
+    let needle = q.q.trim().to_string();
+    if needle.chars().count() < GREP_MIN_QUERY {
+        return Json(files::GrepResult::default()).into_response();
+    }
+    let index = st.file_index.read().await.clone();
+    let root = st.root.clone();
+    let limit = q.limit.unwrap_or(GREP_DEFAULT_FILES).clamp(1, GREP_MAX_FILES);
+    // Reads every indexed file in the worst case, so never on the async runtime.
+    match tokio::task::spawn_blocking(move || files::grep(&root, &index, &needle, limit, GREP_PER_FILE)).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// The index is a directory walk, cheap enough to simply redo on a timer so a
