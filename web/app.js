@@ -1344,6 +1344,16 @@ function sidecarLabel(sc) {
   }
 }
 
+/* What to say beside the switch: the script's trouble, or what to do next.
+   The tooltip alone was invisible, and a toast is gone in three seconds. */
+function columnsHint(sc, cached) {
+  if (!sc || !sc.enabled) return null;
+  if (sc.state === 'failed') return { text: sc.error || 'the Snowflake script could not start', tone: 'failed' };
+  if (sc.state === 'starting') return { text: 'starting the Snowflake script', tone: 'busy' };
+  if (sc.state === 'busy') return { text: 'querying Snowflake', tone: 'busy' };
+  return cached ? null : { text: 'click a column to fetch its lineage from Snowflake', tone: 'hint' };
+}
+
 function sidecarSwitch() {
   const b = document.createElement('button');
   b.id = 'sidecar-switch';
@@ -2325,6 +2335,15 @@ function catalogColumns(body, n) {
     ? 'no types: run dbt compile --write-catalog to pull them from Snowflake'
     : `${n.columns.length - untyped}/${n.columns.length} typed`;
   tools.append(note, sidecarSwitch());
+  const hint = columnsHint(S.sidecar, n.columns.some((c) => c.up || c.down));
+  if (hint) {
+    const span = document.createElement('span');
+    span.className = 'colhint';
+    span.dataset.tone = hint.tone;
+    span.textContent = hint.text;
+    if (hint.tone === 'failed') span.title = ((S.sidecar && S.sidecar.log) || []).join('\n');
+    tools.appendChild(span);
+  }
   tools.append(Object.assign(document.createElement('div'), { className: 'grow' }));
   tools.appendChild(document.createTextNode('Sort by'));
   for (const [key, label] of [['az', 'A-Z'], ['tests', 'Tests']]) {
@@ -2389,6 +2408,11 @@ function catalogColumns(body, n) {
         const u = document.createElement('b'); u.textContent = `\u2190${c.up}`;
         const dn = document.createElement('b'); dn.textContent = `${c.down}\u2192`;
         lin.append(u, document.createTextNode('  '), dn);
+      } else if (live) {
+        const ask = document.createElement('span');
+        ask.className = 'c-ask';
+        ask.textContent = 'fetch';
+        lin.append(ask);
       } else {
         lin.append(nul());
       }
