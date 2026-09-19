@@ -32,6 +32,8 @@ const S = {
   nodeCache: new Map(),       // /api/node payloads, by query: hover asks far more often than click
   nodeGen: 0,                 // bumped when the manifest or a .env file changes under the cache
   vars: null,                 // payload of /api/vars, for the editor's var() marks
+  outline: null,              // { path, nodes } scanned for the breadcrumb's symbol half
+  crumbLine: -1,              // the line that half was last drawn for
 };
 
 // ------------------------------------------------------------------ util --
@@ -492,11 +494,17 @@ function initEditor() {
     else if (pinned) renderTabs();
   });
   S.cm.on('cursorActivity', updateStatus);
+  S.cm.on('cursorActivity', crumbCursor);
   let rescan = null;
   S.cm.on('change', () => {
     clearTimeout(rescan);
     const doc = S.cm.getDoc();
-    rescan = setTimeout(() => { markRefs(doc, S.active); markVars(doc); }, 500);
+    rescan = setTimeout(() => {
+      markRefs(doc, S.active);
+      markVars(doc);
+      refreshOutline();
+      renderCrumbs();
+    }, 500);
   });
   wireRefClicks(S.cm);
   wireHovers(S.cm);
@@ -701,6 +709,8 @@ function activate(path, focusLineage = true) {
   }
   renderTabs();
   updateStatus();
+  refreshOutline();
+  renderCrumbs();
   // A profile is not in the project, so no tree row and no node answer to it.
   const inProject = f.kind === 'profile' ? '' : f.kind === 'diff' ? f.path : path;
   markTreeSelection(inProject);
@@ -722,6 +732,7 @@ function closeFile(path) {
       $('#diff-host').classList.add('hidden');
       $('#editor-empty').classList.remove('hidden');
       updateStatus();
+      renderCrumbs();
     }
   }
   renderTabs();
@@ -779,6 +790,7 @@ function closeAll() {
   $('#editor-empty').classList.remove('hidden');
   renderTabs();
   updateStatus();
+  renderCrumbs();
 }
 
 function renderTabs() {
@@ -875,6 +887,419 @@ function updateStatus() {
   }
   const c = S.cm.getCursor();
   s.textContent = `${S.active}  ·  ${c.line + 1}:${c.ch + 1}${f.dirty ? '  ·  modified' : ''}${f.truncated ? '  ·  truncated' : ''}`;
+}
+
+// ------------------------------------------------------------ breadcrumbs --
+/* The bar under the tabs: where the file sits in the project, then where the
+   cursor sits inside the file. Both halves navigate, the way VS Code's
+   breadcrumb does. The path half asks /api/dir; the symbol half is scanned in
+   the browser, from the document CodeMirror already holds, so an unsaved edit
+   is reflected without a round trip. */
+
+/* One entry per path segment. `dir` is the folder that segment's menu lists,
+   which is its parent, so the first segment lists the project root. */
+function pathCrumbs(path) {
+  if (!path) return [];
+  const parts = path.split('/').filter((p) => p !== '');
+  return parts.map((label, i) => ({
+    label,
+    path: parts.slice(0, i + 1).join('/'),
+    dir: parts.slice(0, i).join('/'),
+  }));
+}
+
+/* Leading spaces, or -1 when the indentation contains a tab. YAML forbids a tab
+   there, and misreading the nesting is worse than dropping the line. The same
+   refusal src/project.rs makes for dbt_project.yml. */
+function yamlIndent(line) {
+  let n = 0;
+  while (line[n] === ' ') n++;
+  return line[n] === '\t' ? -1 : n;
+}
+
+/* Splits `key: value` at the first `:` outside quotes. YAML only starts a
+   mapping when the colon is followed by a space or ends the line, so `a:b` stays
+   a scalar and `url: http://x` splits once, at the right colon. */
+function yamlKey(s) {
+  let quote = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quote) { if (c === quote) quote = ''; continue; }
+    if (c === '"' || c === "'") { quote = c; continue; }
+    if (c !== ':') continue;
+    const next = s[i + 1];
+    if (next !== undefined && next !== ' ' && next !== '\t') continue;
+    return { key: unquote(s.slice(0, i).trim()), value: s.slice(i + 1).trim() };
+  }
+  return null;
+}
+
+/* One layer of matching quotes, so a quoted key or list entry reads as itself. */
+function unquote(s) {
+  const q = s[0];
+  return (q === '"' || q === "'") && s.length > 1 && s[s.length - 1] === q ? s.slice(1, -1) : s;
+}
+
+/* Every node owns the lines up to the next node that is not below it. Filled in
+   one pass so a cursor line resolves by containment rather than by guessing. */
+function closeRanges(nodes, lastLine) {
+  const open = [];
+  for (let j = 0; j < nodes.length; j++) {
+    while (open.length && nodes[open[open.length - 1]].depth >= nodes[j].depth) {
+      const t = open.pop();
+      nodes[t].endLine = Math.max(nodes[t].line, nodes[j].line - 1);
+    }
+    open.push(j);
+  }
+  for (const t of open) nodes[t].endLine = Math.max(nodes[t].line, lastLine);
+  return nodes;
+}
+
+/* A flat outline of a YAML document: one node per mapping key and per sequence
+   item, in line order, each pointing at its parent. Enough for a breadcrumb and
+   no more. Flow collections, anchors and multi-document files are deliberately
+   not modelled: a dbt properties file uses none of them, and a crumb that is
+   sometimes wrong is worse than a crumb that is absent. */
+function yamlOutline(text) {
+  const lines = text.split('\n');
+  const nodes = [];
+  // The root frame is never popped, so every line has somewhere to attach.
+  const stack = [{ indent: -1, node: -1, item: false, count: 0, leaf: false }];
+  let block = -1;              // indent of the key owning a `|` or `>` body
+
+  const add = (line, col, label, parent) => {
+    nodes.push({ line, col, label, kind: 'scalar', depth: stack.length - 1, parent, endLine: line });
+    return nodes.length - 1;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+    const ind = yamlIndent(raw);
+    if (block >= 0) {
+      // A description block is full of dashes and colons that are not structure.
+      if (trimmed === '' || (ind > block && ind >= 0)) continue;
+      block = -1;
+    }
+    if (trimmed === '' || trimmed[0] === '#' || ind < 0) continue;
+
+    let col = ind;
+    let rest = raw.slice(ind);
+    let item = -1;               // the item opened on this line, if any
+    // `- - a` opens two levels on one line, so the dashes are taken in a loop.
+    while (rest === '-' || rest.startsWith('- ')) {
+      while (stack.length > 1) {
+        const top = stack[stack.length - 1];
+        // A key frame at the same indent is kept: YAML lets a sequence sit at
+        // its key's own column, and that is how dbt files are usually written.
+        if (top.indent > col || top.leaf || (top.indent === col && top.item)) stack.pop();
+        else break;
+      }
+      const parent = stack[stack.length - 1];
+      const idx = add(i, col, String(parent.count++), parent.node);
+      item = idx;
+      if (parent.node >= 0) nodes[parent.node].kind = 'seq';
+      stack.push({ indent: col, node: idx, item: true, count: 0, leaf: false });
+      let k = 1;
+      while (rest[k] === ' ') k++;
+      col += k;
+      rest = rest.slice(k);
+      if (rest === '') break;
+    }
+    if (rest === '' || rest === '-') continue;
+
+    const kv = yamlKey(rest);
+    if (!kv) {
+      // A list of plain strings, which dbt files are full of, reads by value
+      // rather than by index: `satellites > sat_dual__claim`, not `> 4`.
+      if (item >= 0 && rest !== '') {
+        nodes[item].label = unquote(rest);
+        stack[stack.length - 1].leaf = true;
+      }
+      continue;
+    }
+    while (stack.length > 1) {
+      const top = stack[stack.length - 1];
+      if (top.indent >= col || top.leaf) stack.pop();
+      else break;
+    }
+    const parent = stack[stack.length - 1];
+    // A value that is only a comment leaves the key free to adopt children.
+    const value = kv.value[0] === '#' ? '' : kv.value;
+    const leaf = value !== '';
+    const idx = add(i, col, kv.key, parent.node);
+    if (parent.node >= 0) nodes[parent.node].kind = 'map';
+    stack.push({ indent: col, node: idx, item: false, count: 0, leaf });
+    if (leaf && (value[0] === '|' || value[0] === '>')) block = col;
+  }
+  return closeRanges(nodes, lines.length - 1);
+}
+
+/* ATX headings, and none inside a fenced block: that is what a reader navigates
+   a markdown file by. */
+function mdOutline(text) {
+  const lines = text.split('\n');
+  const nodes = [];
+  let fence = '';
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (fence) { if (t.startsWith(fence)) fence = ''; continue; }
+    if (t.startsWith('```')) { fence = '```'; continue; }
+    if (t.startsWith('~~~')) { fence = '~~~'; continue; }
+    if (t[0] !== '#') continue;
+    let level = 0;
+    while (t[level] === '#') level++;
+    if (level > 6 || (t[level] !== undefined && t[level] !== ' ')) continue;
+    const label = t.slice(level).trim();
+    if (!label) continue;
+    let parent = -1;
+    for (let j = nodes.length - 1; j >= 0; j--) {
+      if (nodes[j].depth < level - 1) { parent = j; break; }
+    }
+    nodes.push({
+      line: i, col: lines[i].indexOf('#'), label,
+      kind: 'heading', depth: level - 1, parent, endLine: i,
+    });
+  }
+  return closeRanges(nodes, lines.length - 1);
+}
+
+/* SQL is absent on purpose. A CTE name can only be found honestly by masking
+   strings and comments first, and a bar that occasionally names a case arm as a
+   model section is worse than a bar with nothing after the file name. */
+function documentOutline(path, text) {
+  const mode = modeFor(path);
+  if (mode === 'text/x-yaml') return yamlOutline(text);
+  if (mode === 'text/x-markdown') return mdOutline(text);
+  return [];
+}
+
+/* The nodes containing a line, outermost first. */
+function outlineChainAt(nodes, line) {
+  const out = [];
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].line > line) break;
+    if (nodes[i].endLine >= line) out.push(i);
+  }
+  return out;
+}
+
+function outlineSiblings(nodes, i) {
+  const out = [];
+  for (let j = 0; j < nodes.length; j++) if (nodes[j].parent === nodes[i].parent) out.push(j);
+  return out;
+}
+
+/* The glyph stands for the kind of the node's value, which is what VS Code
+   shows: a mapping, a sequence, or a plain scalar. */
+function crumbIcon(kind) {
+  if (kind === 'map') return '{ }';
+  if (kind === 'seq') return '[ ]';
+  if (kind === 'heading') return '#';
+  return 'abc';
+}
+
+function renderCrumbs() {
+  const bar = $('#crumbs');
+  const f = S.active ? S.open.get(S.active) : null;
+  /* Hidden for a diff, which holds two documents and no cursor, and for the
+     profile, which lives outside the project where /api/dir cannot list. */
+  if (!f || f.kind === 'diff' || f.kind === 'profile') {
+    bar.textContent = '';
+    bar.classList.add('hidden');
+    return;
+  }
+  bar.textContent = '';
+  bar.classList.remove('hidden');
+
+  const segs = pathCrumbs(S.active);
+  segs.forEach((seg, i) => {
+    if (i) bar.appendChild(crumbSep());
+    bar.appendChild(crumbButton(seg.label, '', (btn) =>
+      openCrumbMenu(btn, { kind: 'path', dir: seg.dir, current: seg.path })));
+  });
+
+  const nodes = S.outline && S.outline.path === S.active ? S.outline.nodes : [];
+  for (const idx of outlineChainAt(nodes, S.crumbLine)) {
+    const n = nodes[idx];
+    bar.appendChild(crumbSep());
+    bar.appendChild(crumbButton(n.label, n.kind, (btn) =>
+      openCrumbMenu(btn, { kind: 'symbol', index: idx })));
+  }
+  // A deep path scrolls: the end is the part that says where you are.
+  bar.scrollLeft = bar.scrollWidth;
+}
+
+function crumbSep() {
+  return Object.assign(document.createElement('span'), { className: 'crumb-sep', textContent: '›' });
+}
+
+function crumbButton(label, kind, open) {
+  const b = document.createElement('button');
+  b.className = 'crumb';
+  b.type = 'button';
+  if (kind) {
+    const ic = document.createElement('span');
+    ic.className = 'sicon';
+    ic.dataset.kind = kind;
+    ic.textContent = crumbIcon(kind);
+    b.appendChild(ic);
+  }
+  b.append(Object.assign(document.createElement('span'), { className: 'lbl', textContent: label }));
+  b.addEventListener('click', () => {
+    if (crumbMenu && crumbMenu.anchor === b) return closeCrumbMenu();
+    open(b);
+  });
+  return b;
+}
+
+// A document larger than this is not worth scanning on every keystroke pause.
+const OUTLINE_MAX = 2 * 1024 * 1024;
+
+function refreshOutline() {
+  S.outline = null;
+  S.crumbLine = -1;
+  const f = S.active ? S.open.get(S.active) : null;
+  if (!f || f.kind === 'diff' || f.kind === 'profile' || !f.doc) return;
+  const text = f.doc.getValue();
+  if (text.length > OUTLINE_MAX) return;
+  S.outline = { path: S.active, nodes: documentOutline(S.active, text) };
+  S.crumbLine = S.cm ? S.cm.getCursor().line : 0;
+}
+
+/* Only a change of line can change the chain, and the cursor moves far more
+   often than that. */
+function crumbCursor() {
+  if (!S.outline || S.outline.path !== S.active || !S.cm) return;
+  const line = S.cm.getCursor().line;
+  if (line === S.crumbLine) return;
+  S.crumbLine = line;
+  renderCrumbs();
+}
+
+/* Puts the cursor somewhere in the active document and shows it. Shared by the
+   search results and the symbol crumbs, which want the same three steps. */
+function gotoPos(line, ch = 0) {
+  if (!S.cm) return;
+  const pos = { line: Math.max(0, line), ch: Math.max(0, ch) };
+  S.cm.setCursor(pos);
+  S.cm.scrollIntoView({ from: pos, to: pos }, 120);
+  S.cm.focus();
+}
+
+let crumbMenu = null;                        // { el, anchor, off }
+
+function closeCrumbMenu({ refocus = false } = {}) {
+  if (!crumbMenu) return;
+  const { el, anchor, off } = crumbMenu;
+  crumbMenu = null;
+  off();
+  el.remove();
+  anchor.classList.remove('open');
+  if (refocus) anchor.focus();
+}
+
+/* The menu a crumb opens. A path crumb lists the folder it sits in, so picking
+   a sibling is one click; a folder inside it reopens the menu one level down,
+   which is how VS Code lets you walk the tree without leaving the bar. */
+async function openCrumbMenu(anchor, spec) {
+  closeCrumbMenu();
+  // A card that opened by accident must not sit over a menu opened on purpose.
+  closeHoverCard();
+
+  let rows = [];
+  if (spec.kind === 'path') {
+    let entries;
+    try { entries = await api.get('/api/dir?path=' + encodeURIComponent(spec.dir)); }
+    catch (e) { return toast(e.message, 'err'); }
+    rows = entries.map((entry) => ({
+      label: entry.name,
+      dir: entry.dir,
+      current: entry.path === spec.current,
+      pick: () => {
+        if (entry.dir) return openCrumbMenu(anchor, { kind: 'path', dir: entry.path, current: '' });
+        closeCrumbMenu();
+        openFile(entry.path, { preview: true });
+        revealInTree(entry.path);
+      },
+    }));
+  } else {
+    const nodes = S.outline ? S.outline.nodes : [];
+    if (!nodes[spec.index]) return;
+    rows = outlineSiblings(nodes, spec.index).map((j) => ({
+      label: nodes[j].label,
+      kind: nodes[j].kind,
+      current: j === spec.index,
+      pick: () => { closeCrumbMenu(); gotoPos(nodes[j].line, nodes[j].col); },
+    }));
+  }
+  if (!rows.length) return;
+
+  const el = document.createElement('div');
+  el.className = 'crumbmenu';
+  for (const row of rows) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = row.current ? 'on' : '';
+    const ic = document.createElement('span');
+    if (row.kind) {
+      ic.className = 'sicon';
+      ic.dataset.kind = row.kind;
+      ic.textContent = crumbIcon(row.kind);
+      b.appendChild(ic);
+    } else if (row.dir) {
+      ic.className = 'caret';
+      ic.innerHTML = CHEVRON;
+      b.appendChild(ic);
+    } else {
+      b.appendChild(fileIcon(row.label));
+    }
+    b.append(Object.assign(document.createElement('span'), { className: 'lbl', textContent: row.label }));
+    b.addEventListener('click', row.pick);
+    el.appendChild(b);
+  }
+  document.body.appendChild(el);
+  anchor.classList.add('open');
+
+  const box = el.getBoundingClientRect();
+  const p = placeFloating(anchor.getBoundingClientRect(), { width: box.width, height: box.height },
+    { width: window.innerWidth, height: window.innerHeight }, 2);
+  el.style.top = `${p.top}px`;
+  el.style.left = `${p.left}px`;
+
+  const buttons = [...el.querySelectorAll('button')];
+  const onKey = (e) => {
+    if (e.key === 'Tab') return closeCrumbMenu();
+    const i = buttons.indexOf(document.activeElement);
+    const step = { ArrowDown: 1, ArrowUp: -1 }[e.key];
+    if (e.key !== 'Escape' && !step) return;
+    // Handled here only: the editor and the global shortcuts never see it.
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === 'Escape') closeCrumbMenu({ refocus: true });
+    else buttons[(i + step + buttons.length) % buttons.length].focus();
+  };
+  const onDown = (e) => { if (!el.contains(e.target) && !anchor.contains(e.target)) closeCrumbMenu(); };
+  // Scrolling the crumb bar away leaves the menu floating in the wrong place.
+  const onScroll = (e) => {
+    const t = e.target;
+    if (t === document || (t instanceof Node && t.contains(anchor))) closeCrumbMenu();
+  };
+  const onResize = () => closeCrumbMenu();
+  document.addEventListener('keydown', onKey, true);
+  document.addEventListener('mousedown', onDown, true);
+  document.addEventListener('scroll', onScroll, true);
+  window.addEventListener('resize', onResize);
+  crumbMenu = {
+    el, anchor,
+    off: () => {
+      document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('mousedown', onDown, true);
+      document.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
+    },
+  };
+  (buttons.find((b) => b.classList.contains('on')) || buttons[0]).focus();
 }
 
 // ----------------------------------------------------------------- icons --
@@ -3115,6 +3540,7 @@ function connectTerm() {
 // ---------------------------------------------------------------- palette --
 let palIndex = 0, palHits = [];
 function openPalette() {
+  closeCrumbMenu();
   $('#palette').classList.remove('hidden');
   const input = $('#palette-input');
   input.value = ''; input.focus();
@@ -3278,10 +3704,7 @@ function runGrep() {
 async function openAt(path, line) {
   await openFile(path, { focusLineage: false, preview: true });
   if (!S.cm || S.active !== path) return;
-  const pos = { line: Math.max(0, line - 1), ch: 0 };
-  S.cm.setCursor(pos);
-  S.cm.scrollIntoView({ from: pos, to: pos }, 120);
-  S.cm.focus();
+  gotoPos(line - 1, 0);
 }
 
 function wireTabs() {
