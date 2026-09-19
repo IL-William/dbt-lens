@@ -88,10 +88,12 @@ frontend fix does not exist in a release binary until it is rebuilt (see 0005).
 | read a `.yml` file from the server, or reach for a YAML parser | [0018](docs/decisions/0018-project-vars-by-scanner.md) |
 | return any value derived from a `.env` file | [0019](docs/decisions/0019-a-resolved-value-may-be-shown.md) |
 | make the server read files it was not asked for by name | [0020](docs/decisions/0020-search-never-opens-an-env-file.md) |
+| show the structure inside a file, or parse SQL for it | [0022](docs/decisions/0022-the-outline-is-scanned-in-the-browser.md) |
+| read a `.sql` file to work out anything at all | [0002](docs/decisions/0002-lineage-from-the-manifest.md), [0023](docs/decisions/0023-column-lineage-may-be-parsed.md) |
 | set this up for someone, rather than change it | [README, Getting started](README.md#getting-started) |
 | pick up the next piece of work | [docs/state.md](docs/state.md) |
 
-All twenty decisions, with what was rejected each time, are indexed in
+Every decision, with what was rejected each time, is indexed in
 [docs/decisions/](docs/decisions/). The [README](README.md) is the user-facing
 documentation: what the tool does and how to use it. Rationale lives here, never
 in both.

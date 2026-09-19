@@ -21,6 +21,12 @@ scanner over `dbt_project.yml` (0018), because the manifest does not carry them.
 Showing a resolved value needed the .env boundary widened, which 0019 does,
 under two guards.
 
+Breadcrumb bar, added 2026-09-18: the row under the tabs shows the file's path
+and, inside a `.yml` or a `.md`, where the cursor sits in the document. Every
+segment opens a menu, so a sibling file or a neighbouring model is one click
+away without leaving the editor. The outline is scanned in the browser (0022);
+`.sql` shows the path only, until string and comment masking exists.
+
 Search across file contents, added 2026-09-18: the Search tab reads the indexed
 files rather than their names, so a column used in forty models is findable. It
 never opens a `.env` (0020). A full pass over a 12 000 file project is under a
@@ -44,21 +50,24 @@ pass confined `/api/git/diff` to the project and added `SECURITY.md`.
    named selectors locally, validate against `dbt ls`, and only then scan the
    orchestrator's jobs to show which models no schedule covers.
 4. **A var's definition line, clickable.** The card names
-   `dbt_project.yml:<line>`; opening the file there needs a YAML key scanner in
-   the browser, which nothing else wants yet.
+   `dbt_project.yml:<line>`. The scanner this was waiting for now exists:
+   `yamlOutline` plus `gotoPos` in `web/app.js` is most of the work.
+5. **Symbols in SQL.** CTE names and `{% macro %}` blocks in the breadcrumb,
+   which needs SQL strings and comments masked first, for the reason 0022 gives.
 
 Sketched but not started: a second column-lineage source using dbt Fusion's
 local index (`dbt compile --static-analysis strict --write-index
 --write-lineage`), which needs no warehouse privileges and covers uncommitted
 SQL. It fills the same cache file (0008).
 
-0.2.0 adds the hover cards. Since 0.2.0 the binary also carries a build stamp
+0.3.0 adds the breadcrumb bar. 0.2.0 added the hover cards; since 0.2.0 the
+binary also carries a build stamp
 (`git describe`, or a build date without a `.git`), shown by `--version`, by the
 startup banner and in the status bar, because until then two installs of the
 same release were indistinguishable and reinstalling on the VM looked like it
 had done nothing.
 
-0.2.0 is tagged, as 0.1.0 was, and released on GitHub as source only. No binary
+0.3.0 is tagged, as 0.2.0 and 0.1.0 were, and released on GitHub as source only. No binary
 is attached, so installing means building from source, as
 [the README](../README.md#getting-started) describes. Attaching binaries is a
 deliberate later step: an unsigned executable download brings its own friction
@@ -106,6 +115,8 @@ cross-compile.
 - **`openFile` sits inside the slice `web/tests/tabs.js` evaluates.** Anything
   new it calls has to be stubbed there, or the harness dies with no output at
   all rather than a failed assertion.
+  This is why the breadcrumb hooks hang off `activate`, which that harness
+  already stubs, and not off `openFile`.
 - **Reaching the server by any name other than `127.0.0.1` or `localhost`
   gets a 403** (0015). A tunnel or a proxy in front of it is not a supported
   setup, and the symptom is every request refused, not a blank page.

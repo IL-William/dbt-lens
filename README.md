@@ -156,7 +156,7 @@ opens a browser:
   reading /home/you/analytics/target/manifest.json
   2104 nodes in 180 ms  (412 models, 96 sources, 1508 tests)
 
-  dbt-lens  0.2.0  (v0.2.0, built 2026-09-18)
+  dbt-lens  0.3.0  (v0.3.0, built 2026-09-18)
   project   /home/you/analytics
   shell     /bin/zsh -l
   venv      dbt-env (activated, python 3.12)
@@ -209,6 +209,7 @@ sub-graphs around whichever model you are looking at.
 | click a column in Catalog > Columns | draw its lineage, fetched from Snowflake when the switch is on |
 | hover a lineage node, a `ref()` or a `var()` | a card with what it is |
 | the Search tab in the sidebar | find a word inside every file, not just in their names |
+| click a segment of the breadcrumb bar | a menu of that folder's contents, or of the neighbouring keys |
 | click a lineage node | select it, fill the Node panel |
 | double-click a lineage node | re-centre the lineage on it and open its file |
 | `+N` badge on a node | pull in one more level of parents or children |
@@ -545,6 +546,20 @@ top of the sidebar lists every open file with its own close and save buttons,
 plus save-all and close-all in its header. Closing a tab never touches the file
 on disk.
 
+### Breadcrumbs
+
+The row under the tabs says where you are twice over: the file's path through
+the project, then, inside a `.yml` or a `.md`, where the cursor sits in the
+document, as `models > 0 > data_tests`. Every segment is a button. A path
+segment opens a menu of the folder it sits in, where a folder drills one level
+down and a file opens in a preview tab; a document segment lists the keys or the
+list entries beside it and jumps the cursor to the one you pick. Arrow keys move
+in the menu, Enter picks, Escape closes.
+
+A `.sql` file shows its path and stops there. Finding a CTE name honestly means
+masking SQL strings and comments first, and a bar that is occasionally wrong is
+worse than one that is short.
+
 ### Options
 
 ```
@@ -621,6 +636,7 @@ src/venv.rs       which Python environment is in play
 src/files.rs      filesystem access, confined to the project root
 src/pty.rs        one PTY per terminal connection
 web/              UI: no framework, CodeMirror 5 and xterm.js are vendored
+web/app.js        the shell, including the document outline behind the breadcrumbs
 web/lineage.js    layered graph layout and SVG renderer, model and column modes
 web/vendor/       CodeMirror, xterm, the merge addon and diff-match-patch
 tools/            sf_lineage.py, the only piece that talks to Snowflake
