@@ -27,6 +27,7 @@ it is built this way, for whoever changes it next.
 | [0019](0019-a-resolved-value-may-be-shown.md) | A resolved value may reach the browser, under two guards | returning any value derived from a `.env` file |
 | [0020](0020-search-never-opens-an-env-file.md) | A content search never opens a `.env` file | making the server read files it was not asked for by name |
 | [0021](0021-one-cache-file-per-producer.md) | One column-lineage cache per producer, and the user picks | adding a source of column lineage, or changing where one writes |
+| [0023](0023-column-lineage-may-be-parsed.md) | Column lineage may be parsed out of SQL, and 0002 still holds | reading a `.sql` file to work out anything, or wondering how 0002 allows collin |
 
 ## Keeping these honest
 
